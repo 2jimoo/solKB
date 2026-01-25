@@ -9,15 +9,17 @@ _ALLOWED_BINOPS = {
     ast.Div: op.truediv,
     ast.FloorDiv: op.floordiv,
     ast.Mod: op.mod,
-    ast.Pow: op.pow,   # remove if you want to disallow exponent
+    ast.Pow: op.pow,  # remove if you want to disallow exponent
 }
 _ALLOWED_UNARYOPS = {
     ast.UAdd: op.pos,
     ast.USub: op.neg,
 }
 
+
 class SafeMathError(ValueError):
     pass
+
 
 def safe_eval_math(expr: str, *, max_len: int = 200) -> float:
     if not isinstance(expr, str) or not expr.strip():

@@ -8,6 +8,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from agent_system.kb import JsonlKB
 from agent_system.tools.registry import ToolRegistry
 
+
 class SLMRunnerHF:
     """
     HF local Qwen3 runner that 'calls tools' via JSON-only action protocol.
@@ -22,7 +23,7 @@ class SLMRunnerHF:
         model_id: str = "Qwen/Qwen3-4B-Instruct-2507",
         device_map: str = "auto",
         torch_dtype: Optional[torch.dtype] = None,
-        max_new_tokens: int = 256,
+        max_new_tokens: int = 5000,
         temperature: float = 0.2,
         top_p: float = 0.9,
     ):
@@ -42,7 +43,10 @@ class SLMRunnerHF:
         )
         self.model.eval()
 
-        if self.tokenizer.pad_token_id is None and self.tokenizer.eos_token_id is not None:
+        if (
+            self.tokenizer.pad_token_id is None
+            and self.tokenizer.eos_token_id is not None
+        ):
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
     @torch.inference_mode()
@@ -65,7 +69,7 @@ class SLMRunnerHF:
             pad_token_id=self.tokenizer.pad_token_id,
             eos_token_id=self.tokenizer.eos_token_id,
         )
-        gen_ids = out[0][input_ids.shape[-1]:]
+        gen_ids = out[0][input_ids.shape[-1] :]
         return self.tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
 
     def solve_with_tools(
@@ -77,7 +81,7 @@ class SLMRunnerHF:
         max_tool_turns: int = 6,
     ) -> Dict[str, Any]:
         system = (
-            "You are a small solver. You MUST output valid JSON ONLY.\n"
+            "You are a problem solver. You MUST output valid JSON ONLY.\n"
             "Choose exactly one:\n"
             'A) {"action":"TOOL_CALL","tool_name":"<name>","arguments":{...}}\n'
             'B) {"action":"FINAL","answer":"<final answer>"}\n'
@@ -87,7 +91,10 @@ class SLMRunnerHF:
 
         messages = [
             {"role": "system", "content": system},
-            {"role": "user", "content": f"Question:\n{question}\n\nAvailable tools:\n{tools.list_names()}"},
+            {
+                "role": "user",
+                "content": f"Question:\n{question}\n\nAvailable tools:\n{tools.list_names()}",
+            },
         ]
 
         trace: List[Dict[str, Any]] = []
@@ -96,24 +103,39 @@ class SLMRunnerHF:
             trace.append({"turn": turn, "slm_raw": raw})
 
             if kb and node_id:
-                kb.append({"event": "slm_raw", "task_id": node_id, "turn": turn, "raw": raw})
+                kb.append(
+                    {"event": "slm_raw", "task_id": node_id, "turn": turn, "raw": raw}
+                )
 
             try:
                 action = json.loads(raw)
             except json.JSONDecodeError:
                 messages.append({"role": "assistant", "content": raw})
-                messages.append({"role": "user", "content": "Output MUST be valid JSON. Retry."})
+                messages.append(
+                    {"role": "user", "content": "Output MUST be valid JSON. Retry."}
+                )
                 continue
 
             if action.get("action") == "FINAL":
-                return {"status": "final", "answer": action.get("answer", ""), "trace": trace}
+                return {
+                    "status": "final",
+                    "answer": action.get("answer", ""),
+                    "trace": trace,
+                }
 
             if action.get("action") == "TOOL_CALL":
                 tool_name = action.get("tool_name")
                 args = action.get("arguments") or {}
 
                 if kb and node_id:
-                    kb.append({"event": "slm_tool_call", "task_id": node_id, "tool_name": tool_name, "arguments": args})
+                    kb.append(
+                        {
+                            "event": "slm_tool_call",
+                            "task_id": node_id,
+                            "tool_name": tool_name,
+                            "arguments": args,
+                        }
+                    )
 
                 try:
                     out = tools.call(tool_name, args)
@@ -121,16 +143,38 @@ class SLMRunnerHF:
                     out = {"error": str(e), "tool_name": tool_name, "arguments": args}
 
                 if kb and node_id:
-                    kb.append({"event": "slm_tool_result", "task_id": node_id, "tool_name": tool_name, "output": out})
+                    kb.append(
+                        {
+                            "event": "slm_tool_result",
+                            "task_id": node_id,
+                            "tool_name": tool_name,
+                            "output": out,
+                        }
+                    )
 
-                messages.append({"role": "assistant", "content": json.dumps(action, ensure_ascii=False)})
-                messages.append({"role": "user", "content": (
-                    f"Tool result for {tool_name}:\n{json.dumps(out, ensure_ascii=False)}\n\n"
-                    "Continue and respond with FINAL JSON (or another TOOL_CALL if still needed)."
-                )})
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": json.dumps(action, ensure_ascii=False),
+                    }
+                )
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Tool result for {tool_name}:\n{json.dumps(out, ensure_ascii=False)}\n\n"
+                            "Continue and respond with FINAL JSON (or another TOOL_CALL if still needed)."
+                        ),
+                    }
+                )
                 continue
 
             messages.append({"role": "assistant", "content": raw})
-            messages.append({"role": "user", "content": "Invalid action. Output JSON with action TOOL_CALL or FINAL."})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": "Invalid action. Output JSON with action TOOL_CALL or FINAL.",
+                }
+            )
 
         return {"status": "tool_turn_limit", "answer": "", "trace": trace}

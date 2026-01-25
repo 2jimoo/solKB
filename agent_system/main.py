@@ -5,12 +5,22 @@ from agent_system.tools import build_tool_registry
 from agent_system.llm import LLMRunnerWithTools, LLMSupervisor
 from agent_system.slm import SLMRunnerHF
 from agent_system.orchestrator import RecursiveSolver
+from dotenv import load_dotenv
+import os
+import logging
+
+load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,  
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
 
 def main():
     kb = JsonlKB("kb.jsonl")
     tools = build_tool_registry()
 
-    llm_runner = LLMRunnerWithTools(model="gpt-4.1-mini")
+    llm_runner = LLMRunnerWithTools(model="gpt-4o")
     supervisor = LLMSupervisor(llm_runner)
 
     slm = SLMRunnerHF(model_id="Qwen/Qwen3-4B-Instruct-2507")
@@ -38,6 +48,7 @@ def main():
     print("\n=== RESULT ===")
     print(json.dumps(result, indent=2, ensure_ascii=False))
     print("\nKB written to kb.jsonl")
+
 
 if __name__ == "__main__":
     main()

@@ -2,8 +2,10 @@ from __future__ import annotations
 import json
 from typing import Any, Dict
 
+
 class JsonlKB:
     """Append-only JSONL KB/logger."""
+
     def __init__(self, path: str):
         self.path = path
 

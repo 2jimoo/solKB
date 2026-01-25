@@ -8,6 +8,11 @@ from agent_system.tools.registry import ToolRegistry
 from agent_system.llm.supervisor import LLMSupervisor
 from agent_system.slm.runner_hf import SLMRunnerHF
 
+import logging
+
+logger = logging.getLogger(__name__)
+
+
 class RecursiveSolver:
     def __init__(
         self,
@@ -26,8 +31,15 @@ class RecursiveSolver:
         self.require_all_subtasks = require_all_subtasks
         self.nodes: Dict[str, TaskNode] = {}
 
-    def _new_node(self, question: str, depth: int, parent_id: Optional[str]) -> TaskNode:
-        node = TaskNode(task_id=str(uuid.uuid4()), question=question, depth=depth, parent_id=parent_id)
+    def _new_node(
+        self, question: str, depth: int, parent_id: Optional[str]
+    ) -> TaskNode:
+        node = TaskNode(
+            task_id=str(uuid.uuid4()),
+            question=question,
+            depth=depth,
+            parent_id=parent_id,
+        )
         self.nodes[node.task_id] = node
         self.kb.append({"event": "node_created", "node": node.__dict__})
         return node
@@ -35,7 +47,9 @@ class RecursiveSolver:
     def _update(self, node: TaskNode, **updates) -> None:
         for k, v in updates.items():
             setattr(node, k, v)
-        self.kb.append({"event": "node_updated", "task_id": node.task_id, "updates": updates})
+        self.kb.append(
+            {"event": "node_updated", "task_id": node.task_id, "updates": updates}
+        )
 
     def _recompute_max_depth(self, node_id: str) -> int:
         node = self.nodes[node_id]
@@ -46,12 +60,16 @@ class RecursiveSolver:
         node.max_derived_depth = child_max
         return child_max
 
-    def run(self, root_question: str, reference_answer: Optional[str] = None) -> Dict[str, object]:
+    def run(
+        self, root_question: str, reference_answer: Optional[str] = None
+    ) -> Dict[str, object]:
         root = self._new_node(root_question, depth=0, parent_id=None)
         self._solve_node(root, reference_answer=reference_answer)
 
         self._recompute_max_depth(root.task_id)
-        self.kb.append({"event": "root_final", "root": self.nodes[root.task_id].__dict__})
+        self.kb.append(
+            {"event": "root_final", "root": self.nodes[root.task_id].__dict__}
+        )
 
         return {
             "root_id": root.task_id,
@@ -67,9 +85,14 @@ class RecursiveSolver:
             return
 
         # 1) Decompose
-        subtasks = self.supervisor.decompose(node.question, node.depth, self.tools, self.kb, node.task_id)
+        subtasks = self.supervisor.decompose(
+            node.question, node.depth, self.tools, self.kb, node.task_id
+        )
+        logger.info(f"LLM tried to decompose:\n {subtasks}")
         self._update(node, status="expanded")
-        self.kb.append({"event": "decomposed", "task_id": node.task_id, "subtasks": subtasks})
+        self.kb.append(
+            {"event": "decomposed", "task_id": node.task_id, "subtasks": subtasks}
+        )
 
         solved_subtasks: List[Dict[str, str]] = []
         solved_count = 0
@@ -81,19 +104,47 @@ class RecursiveSolver:
             self._update(node, children_ids=node.children_ids)
 
             # 2a) SLM solve with tools
-            slm_res = self.slm.solve_with_tools(child.question, self.tools, kb=self.kb, node_id=child.task_id, max_tool_turns=6)
-            slm_answer = (slm_res.get("answer") or "").strip()
+            slm_res = self.slm.solve_with_tools(
+                child.question,
+                self.tools,
+                kb=self.kb,
+                node_id=child.task_id,
+                max_tool_turns=6,
+            )
+            slm_answer = (str(slm_res.get("answer")) or "").strip()
+            logger.info(f"SLM tried to solve:\n {slm_answer}")
             self._update(child, slm_answer=slm_answer)
-            self.kb.append({"event": "slm_done", "task_id": child.task_id, "slm_res": slm_res})
+            self.kb.append(
+                {"event": "slm_done", "task_id": child.task_id, "slm_res": slm_res}
+            )
 
             # 2b) LLM verify with tools
-            v = self.supervisor.verify(child.question, slm_answer, self.tools, self.kb, child.task_id, reference_answer=None)
-            self._update(child, llm_verdict=v["verdict"], llm_reason=v["reason"], llm_evidence=v["evidence"])
+            v = self.supervisor.verify(
+                child.question,
+                slm_answer,
+                self.tools,
+                self.kb,
+                child.task_id,
+                reference_answer=None,
+            )
+            logger.info(
+                f"LLM tried to verify subtask: {v['verdict']}\n-> {v['reason']}"
+            )
+            self._update(
+                child,
+                llm_verdict=v["verdict"],
+                llm_reason=v["reason"],
+                llm_evidence=v["evidence"],
+            )
             self.kb.append({"event": "verified", "task_id": child.task_id, **v})
 
             if v["verdict"] == "correct":
-                self._update(child, status="solved", solvable=1, final_answer=slm_answer)
-                solved_subtasks.append({"subtask": child.question, "answer": slm_answer})
+                self._update(
+                    child, status="solved", solvable=1, final_answer=slm_answer
+                )
+                solved_subtasks.append(
+                    {"subtask": child.question, "answer": slm_answer}
+                )
                 solved_count += 1
                 continue
 
@@ -101,16 +152,26 @@ class RecursiveSolver:
             if child.depth < self.max_depth - 1:
                 self._solve_node(child, reference_answer=reference_answer)
                 if self.nodes[child.task_id].status == "solved":
-                    bubbled = (self.nodes[child.task_id].final_answer or self.nodes[child.task_id].slm_answer or "").strip()
-                    solved_subtasks.append({"subtask": child.question, "answer": bubbled})
+                    bubbled = (
+                        self.nodes[child.task_id].final_answer
+                        or self.nodes[child.task_id].slm_answer
+                        or ""
+                    ).strip()
+                    solved_subtasks.append(
+                        {"subtask": child.question, "answer": bubbled}
+                    )
                     solved_count += 1
                     self._update(node, solvable=1)
                     continue
 
             self._update(child, status="failed")
+            logger.info(f"SLM subtask failed.")
+            break
 
         # 3) Synthesize final answer for this node
-        final = self.supervisor.synthesize(node.question, solved_subtasks, self.tools, self.kb, node.task_id)
+        final = self.supervisor.synthesize(
+            node.question, solved_subtasks, self.tools, self.kb, node.task_id
+        )
         self._update(node, final_answer=final)
 
         # 4) Verify final (apply reference only at root if provided)
@@ -122,8 +183,18 @@ class RecursiveSolver:
             node.task_id,
             reference_answer=(reference_answer if node.depth == 0 else None),
         )
-        self._update(node, llm_verdict=v_final["verdict"], llm_reason=v_final["reason"], llm_evidence=v_final["evidence"])
-        self.kb.append({"event": "node_final_verified", "task_id": node.task_id, **v_final})
+        logger.info(
+            f"LLM tried to verify task: {v_final['verdict']}\n-> {v_final['reason']}"
+        )
+        self._update(
+            node,
+            llm_verdict=v_final["verdict"],
+            llm_reason=v_final["reason"],
+            llm_evidence=v_final["evidence"],
+        )
+        self.kb.append(
+            {"event": "node_final_verified", "task_id": node.task_id, **v_final}
+        )
 
         # 5) Decide solved/failed
         if node.depth == 0 and reference_answer is not None:
@@ -134,9 +205,9 @@ class RecursiveSolver:
             return
 
         if self.require_all_subtasks:
-            ok = (len(subtasks) > 0 and solved_count == len(subtasks))
+            ok = len(subtasks) > 0 and solved_count == len(subtasks)
         else:
-            ok = (solved_count > 0)
+            ok = solved_count > 0
 
         self._update(node, status="solved" if ok else "failed")
         if ok:

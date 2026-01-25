@@ -1,90 +1,167 @@
 from __future__ import annotations
+
+from agent_system.kb import JsonlKB
+from agent_system.tools.registry import ToolRegistry
 import json
 import time
 from typing import Any, Dict, List, Optional
 
 from openai import OpenAI
 
-from agent_system.kb import JsonlKB
-from agent_system.tools.registry import ToolRegistry
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 class LLMRunnerWithTools:
-    def __init__(self, model: str = "gpt-4.1-mini"):
+    def __init__(self, model: str = "gpt-4o"):
         self.client = OpenAI()
         self.model = model
 
     def run(
         self,
         messages: List[Dict[str, str]],
-        tools: ToolRegistry,
-        kb: Optional[JsonlKB] = None,
+        tools,
+        kb: Optional[Any] = None,
         node_id: Optional[str] = None,
         label: str = "llm_run",
-        response_format: Optional[Dict[str, Any]] = None,
+        schema: Optional[Dict[str, Any]] = None,
         max_steps: int = 8,
     ):
-        resp = self.client.responses.create(
+        # --- first call ---
+        kwargs = dict(
             model=self.model,
             input=messages,
             tools=tools.openai_tools,
-            response_format=response_format,
+            text={"format": schema} if schema else None,
         )
-
+        resp = self.client.responses.create(**kwargs)
+        logger.info(f"LLM tried to run.\n-> resp: {resp}")
         if kb and node_id:
-            kb.append({"event": label, "task_id": node_id, "stage": "start", "response_id": resp.id})
+            kb.append(
+                {
+                    "event": label,
+                    "task_id": node_id,
+                    "stage": "start",
+                    "response_id": resp.id,
+                }
+            )
 
+        # --- tool loop ---
         for step in range(max_steps):
             tool_calls = []
-            for item in (getattr(resp, "output", None) or []):
-                t = getattr(item, "type", None) or item.get("type")
-                if t == "tool_call":
-                    tool_calls.append({
-                        "id": getattr(item, "id", None) or item.get("id"),
-                        "name": getattr(item, "name", None) or item.get("name"),
-                        "arguments": getattr(item, "arguments", None) or item.get("arguments"),
-                    })
 
+            output_items = getattr(resp, "output", None) or []
+            for item in output_items:
+                # item can be a pydantic-ish object or a dict
+                if isinstance(item, dict):
+                    t = item.get("type")
+                    name = item.get("name")
+                    arguments = item.get("arguments")
+                    item_id = item.get("id")
+                    call_id = item.get("call_id")
+                else:
+                    t = getattr(item, "type", None)
+                    name = getattr(item, "name", None)
+                    arguments = getattr(item, "arguments", None)
+                    item_id = getattr(item, "id", None)
+                    call_id = getattr(item, "call_id", None)
+
+                # Responses API commonly uses "function_call"
+                if t in ("tool_call", "function_call"):
+                    tool_calls.append(
+                        {
+                            "id": item_id,
+                            "call_id": call_id,
+                            "name": name,
+                            "arguments": arguments,
+                        }
+                    )
+
+            # no tool calls => done
             if not tool_calls:
                 if kb and node_id:
-                    kb.append({"event": label, "task_id": node_id, "stage": "done", "output_text": getattr(resp, "output_text", "")})
+                    kb.append(
+                        {
+                            "event": label,
+                            "task_id": node_id,
+                            "stage": "done",
+                            "output_text": getattr(resp, "output_text", "") or "",
+                        }
+                    )
                 return resp
 
+            # execute tool calls and send tool_results
             tool_results = []
             for tc in tool_calls:
-                raw_args = tc["arguments"]
+                raw_args = tc.get("arguments")
+
+                # arguments can be a JSON string or dict
                 if isinstance(raw_args, str):
-                    args = json.loads(raw_args) if raw_args.strip() else {}
+                    raw_args = raw_args.strip()
+                    args = json.loads(raw_args) if raw_args else {}
                 elif isinstance(raw_args, dict):
                     args = raw_args
                 else:
                     args = {}
 
                 if kb and node_id:
-                    kb.append({"event": "llm_tool_call", "task_id": node_id, "tool_name": tc["name"], "arguments": args})
+                    kb.append(
+                        {
+                            "event": "llm_tool_call",
+                            "task_id": node_id,
+                            "tool_name": tc.get("name"),
+                            "arguments": args,
+                        }
+                    )
 
                 try:
                     out = tools.call(tc["name"], args)
                 except Exception as e:
-                    out = {"error": str(e), "tool": tc["name"], "args": args}
+                    out = {"error": str(e), "tool": tc.get("name"), "args": args}
+                logger.info(
+                    f"LLM tried to call tool ({tc['name']}) with parameters ({args}).\n-> res: {out}"
+                )
 
                 if kb and node_id:
-                    kb.append({"event": "llm_tool_result", "task_id": node_id, "tool_name": tc["name"], "output": out})
+                    kb.append(
+                        {
+                            "event": "llm_tool_result",
+                            "task_id": node_id,
+                            "tool_name": tc.get("name"),
+                            "output": out,
+                        }
+                    )
 
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_call_id": tc["id"],
-                    "output": json.dumps(out, ensure_ascii=False),
-                })
-
-            resp = self.client.responses.create(
+                # IMPORTANT: tool_call_id should match call_id if present (your log shows call_id='call_...')
+                tool_results.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": tc.get("call_id") or tc.get("id"),
+                        "output": json.dumps(out, ensure_ascii=False),
+                    }
+                )
+            # follow-up call (continue the same response thread)
+            kwargs2 = dict(
                 model=self.model,
                 previous_response_id=resp.id,
                 input=tool_results,
                 tools=tools.openai_tools,
-                response_format=response_format,
+                text={"format": schema} if schema else None,
             )
-            time.sleep(0.05)
+            resp = self.client.responses.create(**kwargs2)
+            logger.info(f"LLM tried to run with tool results.\n-> resp: {resp}")
+            time.sleep(0.5)
 
+        # if max steps reached
         if kb and node_id:
-            kb.append({"event": label, "task_id": node_id, "stage": "max_steps_reached", "output_text": getattr(resp, "output_text", "")})
+            kb.append(
+                {
+                    "event": label,
+                    "task_id": node_id,
+                    "stage": "max_steps_reached",
+                    "output_text": getattr(resp, "output_text", "") or "",
+                }
+            )
+        logger.info(f"LLM tried to make final answer.\n-> resp: {resp}")
         return resp
