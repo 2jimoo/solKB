@@ -1,3 +1,9 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Environment / secrets
 .env
-*/__pycache__
-*.jsonl
+
+# Logs & temp
+*.log
