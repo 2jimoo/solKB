@@ -8,6 +8,10 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from agent_system.kb import JsonlKB
 from agent_system.tools.registry import ToolRegistry
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 class SLMRunnerHF:
     """
@@ -100,6 +104,7 @@ class SLMRunnerHF:
         trace: List[Dict[str, Any]] = []
         for turn in range(max_tool_turns):
             raw = self._generate(messages)
+            logger.debug(f"raw respose:\n{raw}")
             trace.append({"turn": turn, "slm_raw": raw})
 
             if kb and node_id:
@@ -141,6 +146,7 @@ class SLMRunnerHF:
                     out = tools.call(tool_name, args)
                 except Exception as e:
                     out = {"error": str(e), "tool_name": tool_name, "arguments": args}
+                logger.debug(f"tool call respose:\n{out}")
 
                 if kb and node_id:
                     kb.append(

@@ -15,8 +15,76 @@ class LLMSupervisor:
     def __init__(self, runner: LLMRunnerWithTools):
         self.runner = runner
 
+    def root_decompose(
+        self,
+        reference_planning: str,
+        tools: ToolRegistry,
+        kb: JsonlKB,
+        node_id: str,
+    ):
+        steps_schema = {
+            "type": "json_schema",
+            "name": "decomposition_steps",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "steps": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "maxItems": 5,
+                    }
+                },
+                "required": ["steps"],
+                "additionalProperties": False,
+            },
+        }
+
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You make a easier and more concise plan for a smaller task agent based on reference plannings of a strong agent.\n"
+                    "For each planning step, explicitly state the relevant rules or information derived from the problem that are needed to complete that step.\n"
+                    'Output ONLY valid JSON matching the schema: {"steps": ["...", ...]}.'
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "Reference planning:\n\n" + reference_planning + "\n\n"
+                    'Return JSON: {"steps": [...]} only.'
+                ),
+            },
+        ]
+
+        resp = self.runner.run(
+            messages,
+            tools,
+            kb=kb,
+            node_id=node_id,
+            label="llm_decompose_from_reference_steps",
+            schema=steps_schema,
+        )
+        logger.debug(
+            f"supervisor decomposed (from reference -> steps) results:\n{resp.output_text}"
+        )
+
+        data = json.loads(resp.output_text)
+        steps = [
+            s.strip() for s in data.get("steps", []) if isinstance(s, str) and s.strip()
+        ]
+        return steps
+
     def decompose(
-        self, question: str, depth: int, tools: ToolRegistry, kb: JsonlKB, node_id: str
+        self,
+        root_question: str,
+        question: str,
+        depth: int,
+        tools: ToolRegistry,
+        kb: JsonlKB,
+        node_id: str,
     ) -> List[str]:
         schema = {
             "type": "json_schema",
@@ -36,19 +104,31 @@ class LLMSupervisor:
                 "additionalProperties": False,
             },
         }
+        ctx = kb.planner_context(node_id)
+
         messages = [
             {
                 "role": "system",
                 "content": (
-                    "Decompose into smaller subtasks that a small model can solve. "
-                    "If facts are needed, include fact-finding subtasks (identify entity, read sources, extract dates)."
+                    "Make a plan to solve a task.\n"
+                    "Use the planning/execution history to avoid repeating mistakes.\n"
+                    "- If verification failed before, add subtasks that directly address the failure reason.\n"
+                    "- Prefer evidence-gathering subtasks when prior attempts lacked proof.\n"
+                    "- Do NOT repeat the same incorrect approach.\n"
+                    "- If need, You can try again same parent subtask."
+                    "Return 1-5 subtasks."
                 ),
             },
             {
                 "role": "user",
-                "content": f"Depth={depth}\nTask:\n{question}\nReturn 1-5 subtasks.",
+                "content": (
+                    f"Depth={depth}\nOriginalTask:{root_question}\nCurrentTask:\n{question}\n"
+                    + (f"\n\nPlanning/execution history:\n{ctx}\n" if ctx else "\n")
+                    + "\nReturn 1-5 subtasks."
+                ),
             },
         ]
+
         resp = self.runner.run(
             messages,
             tools,
@@ -57,7 +137,7 @@ class LLMSupervisor:
             label="llm_decompose",
             schema=schema,
         )
-        logger.info(f"supervisor decomposed results: {resp.output_text}")
+        logger.debug(f"supervisor decomposed results:\n{resp.output_text}")
         data = json.loads(resp.output_text)
         return [s.strip() for s in data["subtasks"] if s.strip()]
 
@@ -79,7 +159,12 @@ class LLMSupervisor:
                 "properties": {
                     "verdict": {
                         "type": "string",
-                        "enum": ["correct", "incorrect", "insufficient"],
+                        "enum": [
+                            "final_correct",
+                            "partial_correct",
+                            "incorrect",
+                            "insufficient",
+                        ],
                     },
                     "reason": {"type": "string"},
                     "evidence": {
@@ -95,18 +180,35 @@ class LLMSupervisor:
         messages = [
             {
                 "role": "system",
-                "content": (
-                    "You are a strict verifier. You MAY call tools (serpapi_search, jina_read_url, calc) to check facts. "
-                    "Return verdict + reason + 1-6 short evidence bullets (URLs or extracted facts)."
-                ),
+                "content": """
+                    You are a STRICT VERIFIER for another model's output.
+                    Your role is ONLY to judge whether the model's answer is semantically equivalent to the actual answer.
+
+                    You MUST NOT solve the task yourself.
+                    You MUST NOT provide the correct answer, partial answers, or hints toward the solution.
+                    You MUST NOT suggest what should be done next.
+
+                    You MAY call tools (serpapi_search, jina_read_url, calc) ONLY to CHECK whether the given answer is correct.
+
+                    Evaluation Rules:
+                    - Judge ONLY based on the given answer and verifiable facts.
+                    - Do NOT infer missing steps or complete incomplete reasoning.
+                    - Do NOT introduce new facts unless strictly necessary to explain why the answer is incorrect.
+
+                    Decision Criteria:
+                    - final_correct: The model’s answer is semantically equivalent to the actual final answer (complete and correct).
+                    - partial_correct: The model’s answer is NOT equivalent to the actual final answer, but it contains one or more intermediate results/claims that are correct and relevant, while missing required parts or containing additional incorrect parts.
+                    - incorrect: The model’s answer is not equivalent to the actual final answer and does not contain any clearly correct intermediate results relevant to reaching it (or is too vague to verify).
+
+                """,
             },
             {
                 "role": "user",
                 "content": json.dumps(
                     {
                         "question": question,
-                        "proposed_answer": proposed_answer,
-                        "reference_answer": reference_answer,
+                        "model_answer": proposed_answer,
+                        "actual_answer": reference_answer,
                     },
                     ensure_ascii=False,
                 ),
@@ -115,7 +217,7 @@ class LLMSupervisor:
         resp = self.runner.run(
             messages, tools, kb=kb, node_id=node_id, label="llm_verify", schema=schema
         )
-        logger.info(f"supervisor verifying results: {resp.output_text}")
+        logger.debug(f"supervisor verifying results:\n{resp.output_text}")
         return json.loads(resp.output_text)
 
     def synthesize(
@@ -130,7 +232,9 @@ class LLMSupervisor:
             {
                 "role": "system",
                 "content": (
-                    "Synthesize a final answer from solved subtasks. Call tools if you need to double-check. Be concise."
+                    "Synthesize a final answer from solved subtasks."
+                    "Do NOT introduce new facts, assumptions, reasoning or tool calls."
+                    "Return only the answer to the question, such as the year, numerical value, or name."
                 ),
             },
             {
@@ -144,5 +248,69 @@ class LLMSupervisor:
         resp = self.runner.run(
             messages, tools, kb=kb, node_id=node_id, label="llm_synthesize", schema=None
         )
-        logger.info(f"supervisor synthesized results: {resp.output_text}")
+        logger.debug(f"supervisor synthesized results:\n{resp.output_text}")
         return (resp.output_text or "").strip()
+
+    def summarize_sibling_context_llm(
+        self,
+        root_question: str,
+        current_subtask: str,
+        tools: "ToolRegistry",
+        kb: JsonlKB,
+        parent_task_id: str,
+        node_id_for_trace: str,
+    ) -> str:
+        raw = kb.collect_sibling_raw_logs(parent_task_id=parent_task_id)
+        if not raw:
+            return None
+
+        schema = {
+            "type": "json_schema",
+            "name": "sibling_context_summary",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {"context": {"type": "string"}},
+                "required": ["context"],
+                "additionalProperties": False,
+            },
+        }
+
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You summarize prior sibling execution logs for a downstream small model.\n"
+                    "Goal: extract ONLY the minimal facts, partial results, and failure-avoidance notes needed to solve CURRENT_SUBTASK.\n"
+                    "Rules:\n"
+                    "- Be short (<= 10 bullets or <= 900 chars).\n"
+                    "- Prefer verified-correct facts and concrete entities/dates/URLs if present.\n"
+                    "- If prior attempts failed, include 1-3 'avoid this mistake' notes.\n"
+                    "- Do NOT include irrelevant history. Do NOT restate the whole plan.\n"
+                    "Output JSON: {context: string}."
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "ROOT_QUESTION": root_question,
+                        "CURRENT_SUBTASK": current_subtask,
+                        "SIBLING_RAW_LOGS": raw,
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ]
+
+        resp = self.runner.run(
+            messages,
+            tools,
+            kb=kb,
+            node_id=node_id_for_trace,
+            label="llm_sibling_ctx_summary",
+            schema=schema,
+        )
+        data = json.loads(resp.output_text or "{}")
+        logger.debug(f"supervisor summarize previous result:\n{data}")
+        return (data.get("context") or "").strip()

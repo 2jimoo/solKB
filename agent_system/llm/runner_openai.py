@@ -36,7 +36,7 @@ class LLMRunnerWithTools:
             text={"format": schema} if schema else None,
         )
         resp = self.client.responses.create(**kwargs)
-        logger.info(f"LLM tried to run.\n-> resp: {resp}")
+        logger.debug(f"LLM tried to run.\n-> resp: {resp}")
         if kb and node_id:
             kb.append(
                 {
@@ -119,7 +119,7 @@ class LLMRunnerWithTools:
                     out = tools.call(tc["name"], args)
                 except Exception as e:
                     out = {"error": str(e), "tool": tc.get("name"), "args": args}
-                logger.info(
+                logger.debug(
                     f"LLM tried to call tool ({tc['name']}) with parameters ({args}).\n-> res: {out}"
                 )
 
@@ -150,7 +150,7 @@ class LLMRunnerWithTools:
                 text={"format": schema} if schema else None,
             )
             resp = self.client.responses.create(**kwargs2)
-            logger.info(f"LLM tried to run with tool results.\n-> resp: {resp}")
+            logger.debug(f"LLM tried to run with tool results.\n-> resp: {resp}")
             time.sleep(0.5)
 
         # if max steps reached
@@ -163,5 +163,5 @@ class LLMRunnerWithTools:
                     "output_text": getattr(resp, "output_text", "") or "",
                 }
             )
-        logger.info(f"LLM tried to make final answer.\n-> resp: {resp}")
+        logger.debug(f"LLM tried to make final answer.\n-> resp: {resp}")
         return resp

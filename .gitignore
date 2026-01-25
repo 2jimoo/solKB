@@ -1,9 +1,5 @@
-# Python cache
 __pycache__/
 *.py[cod]
-
-# Environment / secrets
 .env
-
-# Logs & temp
 *.log
+# nohup python -m agent_system.main > agent_system.log 2>&1 &

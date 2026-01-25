@@ -1,6 +1,7 @@
 from __future__ import annotations
 import uuid
 from typing import Dict, List, Optional
+from collections import defaultdict
 
 from agent_system.kb import JsonlKB
 from agent_system.models import TaskNode
@@ -30,12 +31,25 @@ class RecursiveSolver:
         self.max_depth = max_depth
         self.require_all_subtasks = require_all_subtasks
         self.nodes: Dict[str, TaskNode] = {}
+        self.id_counters: Dict[str, int] = defaultdict(int)
 
     def _new_node(
         self, question: str, depth: int, parent_id: Optional[str]
     ) -> TaskNode:
+        # 계층적 ID 생성:
+        # - 루트: "1", "2", ...
+        # - 자식: "<parent>.<n>" (예: "1.1", "1.2")
+        if parent_id is None:
+            # 루트 노드
+            self.id_counters["ROOT"] += 1
+            node_id = str(self.id_counters["ROOT"])
+        else:
+            # 부모의 카운터 증가 후 접두사로 사용
+            self.id_counters[parent_id] += 1
+            node_id = f"{parent_id}.{self.id_counters[parent_id]}"
+
         node = TaskNode(
-            task_id=str(uuid.uuid4()),
+            task_id=node_id,
             question=question,
             depth=depth,
             parent_id=parent_id,
@@ -61,10 +75,18 @@ class RecursiveSolver:
         return child_max
 
     def run(
-        self, root_question: str, reference_answer: Optional[str] = None
+        self,
+        root_question: str,
+        reference_planning: str,
+        reference_answer: Optional[str] = None,
     ) -> Dict[str, object]:
         root = self._new_node(root_question, depth=0, parent_id=None)
-        self._solve_node(root, reference_answer=reference_answer)
+        self._solve_node(
+            root_question,
+            root,
+            reference_planning=reference_planning,
+            reference_answer=reference_answer,
+        )
 
         self._recompute_max_depth(root.task_id)
         self.kb.append(
@@ -79,15 +101,37 @@ class RecursiveSolver:
             "root_solvable": self.nodes[root.task_id].solvable,
         }
 
-    def _solve_node(self, node: TaskNode, reference_answer: Optional[str]) -> None:
+    def _solve_node(
+        self,
+        root_question: str,
+        node: TaskNode,
+        reference_planning: str,
+        reference_answer: Optional[str],
+    ) -> None:
+        logger.info(
+            f"============================================ START {node.task_id} ============================================"
+        )
         if node.depth >= self.max_depth:
             self._update(node, status="failed")
             return
 
         # 1) Decompose
-        subtasks = self.supervisor.decompose(
-            node.question, node.depth, self.tools, self.kb, node.task_id
-        )
+        if node.depth == 0:
+            subtasks = self.supervisor.root_decompose(
+                reference_planning,
+                self.tools,
+                self.kb,
+                node.task_id,
+            )
+        else:
+            subtasks = self.supervisor.decompose(
+                root_question,
+                node.question,
+                node.depth,
+                self.tools,
+                self.kb,
+                node.task_id,
+            )
         logger.info(f"LLM tried to decompose:\n {subtasks}")
         self._update(node, status="expanded")
         self.kb.append(
@@ -98,14 +142,42 @@ class RecursiveSolver:
         solved_count = 0
 
         # 2) Solve each subtask
-        for st in subtasks:
+        for st_idx, st in enumerate(subtasks):
+            logger.info(f"{node.depth}-{st_idx} Task: {st} ")
             child = self._new_node(st, depth=node.depth + 1, parent_id=node.task_id)
             node.children_ids.append(child.task_id)
             self._update(node, children_ids=node.children_ids)
 
-            # 2a) SLM solve with tools
+            # 2a) Summary for SLM
+            sibling_ctx = self.supervisor.summarize_sibling_context_llm(
+                root_question=root_question,
+                current_subtask=child.question,
+                tools=self.tools,
+                kb=self.kb,
+                parent_task_id=node.task_id,
+                node_id_for_trace=child.task_id,
+            )
+            if sibling_ctx:
+                self.kb.append(
+                    {
+                        "event": "sibling_ctx_summary",
+                        "task_id": child.task_id,
+                        "parent_task_id": node.task_id,
+                        "summary": sibling_ctx,
+                    }
+                )
+            exec_question = child.question
+            if sibling_ctx:
+                logger.info(f"LLM summerized history:\n{sibling_ctx}")
+                exec_question = (
+                    f"{child.question}\n\n"
+                    f"[Sibling context]\n{sibling_ctx}\n\n"
+                    "Use the sibling context above. Do not redo solved facts unless necessary."
+                )
+
+            # 2b) SLM solve with tools
             slm_res = self.slm.solve_with_tools(
-                child.question,
+                exec_question,
                 self.tools,
                 kb=self.kb,
                 node_id=child.task_id,
@@ -118,9 +190,46 @@ class RecursiveSolver:
                 {"event": "slm_done", "task_id": child.task_id, "slm_res": slm_res}
             )
 
-            # 2b) LLM verify with tools
+            # 2b-1) LLM try to stop early
+            temp_solved_subtasks = solved_subtasks + [
+                {"subtask": child.question, "answer": slm_answer}
+            ]
+            early_final_answer = self.supervisor.synthesize(
+                root_question,
+                temp_solved_subtasks,
+                self.tools,
+                self.kb,
+                node.task_id,
+            )
+            v_final = self.supervisor.verify(
+                root_question,
+                early_final_answer,
+                self.tools,
+                self.kb,
+                node.task_id,
+                reference_answer=reference_answer,
+            )
+            logger.info(
+                f"LLM tried to stop: {early_final_answer}, {v_final['verdict']}\n-> {v_final['reason']}"
+            )
+            if v_final["verdict"] == "correct":
+                self._update(
+                    node,
+                    status="solved",
+                    solvable=1,
+                    final_answer=early_final_answer,
+                    llm_verdict=v_final["verdict"],
+                    llm_reason=v_final["reason"],
+                    llm_evidence=v_final["evidence"],
+                )
+                logger.info(
+                    f"============================================ END {node.task_id} ============================================"
+                )
+                return
+
+            # 2b-2) LLM verify with tools
             v = self.supervisor.verify(
-                child.question,
+                exec_question,
                 slm_answer,
                 self.tools,
                 self.kb,
@@ -146,11 +255,17 @@ class RecursiveSolver:
                     {"subtask": child.question, "answer": slm_answer}
                 )
                 solved_count += 1
+                logger.info(f"{node.depth}-{st_idx} Task corrected directly. ")
                 continue
 
             # 2c) Recurse if not solved
             if child.depth < self.max_depth - 1:
-                self._solve_node(child, reference_answer=reference_answer)
+                self._solve_node(
+                    root_question,
+                    child,
+                    reference_planning=None,
+                    reference_answer=reference_answer,
+                )
                 if self.nodes[child.task_id].status == "solved":
                     bubbled = (
                         self.nodes[child.task_id].final_answer
@@ -162,10 +277,11 @@ class RecursiveSolver:
                     )
                     solved_count += 1
                     self._update(node, solvable=1)
+                    logger.info(f"{node.depth}-{st_idx} Task corrected recursively. ")
                     continue
 
             self._update(child, status="failed")
-            logger.info(f"SLM subtask failed.")
+            logger.info(f"{node.depth}-{st_idx} Task failed. ")
             break
 
         # 3) Synthesize final answer for this node
@@ -202,6 +318,9 @@ class RecursiveSolver:
                 self._update(node, status="solved", solvable=1)
             else:
                 self._update(node, status="failed")
+            logger.info(
+                f"============================================ END {node.task_id} ============================================"
+            )
             return
 
         if self.require_all_subtasks:
@@ -212,3 +331,7 @@ class RecursiveSolver:
         self._update(node, status="solved" if ok else "failed")
         if ok:
             self._update(node, solvable=1)
+
+        logger.info(
+            f"============================================ END {node.task_id} ============================================"
+        )
