@@ -38,15 +38,6 @@ class LLMRunnerWithTools:
         )
         resp = self.client.responses.create(**kwargs)
         logger.debug(f"LLM tried to run.\n-> resp: {resp}")
-        if kb and node_id:
-            kb.append(
-                {
-                    "event": label,
-                    "task_id": node_id,
-                    "stage": "start",
-                    "response_id": resp.id,
-                }
-            )
 
         # --- tool loop ---
         for step in range(max_steps):
@@ -54,7 +45,6 @@ class LLMRunnerWithTools:
 
             output_items = getattr(resp, "output", None) or []
             for item in output_items:
-                # item can be a pydantic-ish object or a dict
                 if isinstance(item, dict):
                     t = item.get("type")
                     name = item.get("name")
@@ -79,30 +69,15 @@ class LLMRunnerWithTools:
                         }
                     )
 
-            # no tool calls => done
+            # If there are no tool calls, assistant has given an answer -> return it.
             if not tool_calls:
-                try:
-                    setattr(resp, "_executed_tool_calls", executed_tool_calls)
-                except Exception:
-                    pass
-
-                if kb and node_id:
-                    kb.append(
-                        {
-                            "event": label,
-                            "task_id": node_id,
-                            "stage": "done",
-                            "output_text": getattr(resp, "output_text", "") or "",
-                        }
-                    )
+                setattr(resp, "_executed_tool_calls", executed_tool_calls)
                 return resp
 
-            # execute tool calls and send tool_results
+            # --- At this point we have tool calls to execute(1회당 여러개 호출 가능 모두 리스트에 넣어줘야함, 각각 call_id 가짐) ---
             tool_results = []
             for tc in tool_calls:
                 raw_args = tc.get("arguments")
-
-                # arguments can be a JSON string or dict
                 if isinstance(raw_args, str):
                     raw_args = raw_args.strip()
                     args = json.loads(raw_args) if raw_args else {}
@@ -111,39 +86,19 @@ class LLMRunnerWithTools:
                 else:
                     args = {}
 
-                if kb and node_id:
-                    kb.append(
-                        {
-                            "event": "llm_tool_call",
-                            "task_id": node_id,
-                            "tool_name": tc.get("name"),
-                            "arguments": args,
-                        }
-                    )
-
                 try:
                     out = tools.call(tc["name"], args)
                 except Exception as e:
                     out = {"error": str(e), "tool": tc.get("name"), "args": args}
                 logger.debug(
-                    f"LLM tried to call tool ({tc['name']}) with parameters ({args}).\n-> res: {out}"
+                    f"LLM tried {step}-th tool call ({tc['name']}) with parameters ({args}).\n-> res: {out}"
                 )
-
-                if kb and node_id:
-                    kb.append(
-                        {
-                            "event": "llm_tool_result",
-                            "task_id": node_id,
-                            "tool_name": tc.get("name"),
-                            "output": out,
-                        }
-                    )
-
-                # IMPORTANT: tool_call_id should match call_id if present (your log shows call_id='call_...')
                 executed_tool_calls.append(
                     {
                         "name": tc.get("name"),
                         "arguments": args,
+                        "call_id": tc.get("call_id") or tc.get("id"),
+                        "output": json.dumps(out, ensure_ascii=False),
                     }
                 )
                 tool_results.append(
@@ -153,32 +108,62 @@ class LLMRunnerWithTools:
                         "output": json.dumps(out, ensure_ascii=False),
                     }
                 )
-            # follow-up call (continue the same response thread)
+            # follow-up call (continue the same response thread) to have LLM synthesize an answer
             kwargs2 = dict(
                 model=self.model,
                 previous_response_id=resp.id,
-                input=tool_results,
+                # include original messages plus tool outputs; ask LLM explicitly for the answer
+                input=messages
+                + tool_results
+                + [
+                    {
+                        "role": "user",
+                        "content": "\nBased on the above tool results and prior conversation, produce a clear answer now. If you need, you can call tools again.",
+                    }
+                ],
                 tools=tools.openai_tools,
                 text={"format": schema} if schema else None,
             )
             resp = self.client.responses.create(**kwargs2)
-            logger.debug(f"LLM tried to run with tool results.\n-> resp: {resp}")
+            logger.debug(f"LLM tried to solve with tool results.\n-> resp: {resp}")
+
+            # If LLM returned final content without requesting further tool calls -> return it immediately.
+            # (This will be caught by the top-of-loop check on next iteration, but we can short-circuit here.)
+            next_output_items = getattr(resp, "output", None) or []
+            has_tool_call = any(
+                (
+                    (
+                        isinstance(it, dict)
+                        and it.get("type") in ("tool_call", "function_call")
+                    )
+                    or (
+                        not isinstance(it, dict)
+                        and getattr(it, "type", None) in ("tool_call", "function_call")
+                    )
+                )
+                for it in next_output_items
+            )
+
+            if not has_tool_call:
+                setattr(resp, "_executed_tool_calls", executed_tool_calls)
+                return resp
             time.sleep(0.5)
 
-        # if max steps reached
-        try:
-            setattr(resp, "_executed_tool_calls", executed_tool_calls)
-        except Exception:
-            pass
-
-        if kb and node_id:
-            kb.append(
-                {
-                    "event": label,
-                    "task_id": node_id,
-                    "stage": "max_steps_reached",
-                    "output_text": getattr(resp, "output_text", "") or "",
-                }
-            )
-        logger.debug(f"LLM tried to make final answer.\n-> resp: {resp}")
-        return resp
+        # --- max steps reached: force a final synthesis from the model ---
+        tool_trace_text = json.dumps(executed_tool_calls, ensure_ascii=False, indent=2)
+        final_prompt = (
+            "Using the conversation history and all tool results provided so far, produce a concise final answer now.\n"
+            f"TOOL_TRACE:\n{tool_trace_text}"
+        )
+        kwargs_final = dict(
+            model=self.model,
+            input=messages + [{"role": "user", "content": final_prompt}],
+            tool_choice="none",
+            text={"format": schema} if schema else None,
+        )
+        final_resp = self.client.responses.create(**kwargs_final)
+        setattr(final_resp, "_executed_tool_calls", executed_tool_calls)
+        logger.debug(
+            f"LLM produced final answer after max steps.\n-> resp: {final_resp}"
+        )
+        return final_resp

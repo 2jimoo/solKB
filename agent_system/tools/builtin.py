@@ -34,7 +34,7 @@ def tool_searchapi_search(
     }
 
     resp = requests.get(
-        "https://www.searchapi.io/api/v1/search", params=params, timeout=30
+        "https://www.searchapi.io/api/v1/search", params=params, timeout=100
     )
     resp.raise_for_status()
     results = resp.json()
@@ -71,7 +71,7 @@ def tool_serpapi_search(
         "gl": gl,
         "hl": hl,
     }
-    resp = requests.get("https://serpapi.com/search.json", params=params, timeout=30)
+    resp = requests.get("https://serpapi.com/search.json", params=params, timeout=100)
     resp.raise_for_status()
     results = resp.json()
 
@@ -90,7 +90,7 @@ def tool_serpapi_search(
 
 
 def tool_jina_read_url(
-    url: str, timeout_s: int = 30, clip_chars: int = 12000
+    url: str, timeout_s: int = 100, clip_chars: int = 12000
 ) -> Dict[str, Any]:
     if not (url.startswith("http://") or url.startswith("https://")):
         raise ValueError("url must start with http:// or https://")

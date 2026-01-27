@@ -83,14 +83,15 @@ class SLMRunnerHF:
         kb: Optional[JsonlKB] = None,
         node_id: Optional[str] = None,
         max_tool_turns: int = 10,
+        slm_attempt_histories=None,
     ) -> Dict[str, Any]:
         system = (
             "You are a problem solver. You MUST output valid JSON ONLY.\n"
             "Choose exactly one:\n"
             'A) {"action":"TOOL_CALL","tool_name":"<name>","arguments":{...}}\n'
             'B) {"action":"FINAL","answer":"<final answer>"}\n'
-            "No extra keys. No markdown. No commentary. JSON only.\n"
             "If web facts are needed, call serpapi_search then jina_read_url on the best links."
+            f"[Attempt History]{slm_attempt_histories}"
         )
 
         messages = [

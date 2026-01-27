@@ -47,3 +47,9 @@ class SolveReference:
     def __post_init__(self):
         if self.failed_history is None:
             self.failed_history = []
+
+
+@dataclass
+class ToolContribution:
+    tool_name: Optional[str]
+    tool_args: Optional[str]

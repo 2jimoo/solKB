@@ -5,7 +5,12 @@ from typing import Any, Dict, List, Optional
 from agent_system.kb import JsonlKB
 from agent_system.tools.registry import ToolRegistry
 from agent_system.llm.runner_openai import LLMRunnerWithTools
-from agent_system.models import SubtaskSpec, SolveReference, Verification
+from agent_system.models import (
+    SubtaskSpec,
+    SolveReference,
+    Verification,
+    ToolContribution,
+)
 
 import logging
 
@@ -164,12 +169,14 @@ class LLMSupervisorV2:
 
             # 3) if no actual_answer => done
             # 4) derive a single "root answer" from the specs, then semantic-verify
-            derived = self.derive_root_answer(question, specs)
+            derived = self.derive_root_answer(
+                question, specs, tools=tools, kb=kb, node_id=node_id
+            )
             logger.info(
                 f"[{r}]Superviser Answer\nFinal Answer:{derived}\nActual Answer:{actual_answer}"
             )
             if actual_answer is None:
-                if derived != "UNKNOWN":
+                if derived and derived != "UNKNOWN":
                     return last_specs
                 else:
                     continue
@@ -219,15 +226,59 @@ class LLMSupervisorV2:
         return None
 
     # ---------- Derivation policy ----------
-    def derive_root_answer(self, question: str, specs: List[SubtaskSpec]) -> str:
-        """
-        'actual_answer가 있을 때' compare할 단일 답을 어떻게 만들지의 정책.
-        기본은 '마지막 subtask의 expected_answer가 최종답' (분해 프롬프트로 강제).
-        필요하면 여기만 바꿔서 다른 정책(예: 특정 subtask, 합성 LLM 등) 적용 가능.
-        """
+    def derive_root_answer(
+        self,
+        question: str,
+        specs: List[SubtaskSpec],
+        *,
+        tools: ToolRegistry,
+        kb: Optional[JsonlKB],
+        node_id: str,
+    ) -> str:
         if not specs:
             return ""
-        return (specs[-1].expected_answer or "").strip()
+
+        items = [
+            {
+                "idx": i,
+                "subtask": s.subtask,
+                "expected_answer": s.expected_answer,
+                "expected_tool": s.expected_tool,
+                "expected_tool_params": s.expected_tool_params,
+            }
+            for i, s in enumerate(specs, 1)
+        ]
+
+        sys_prompt = (
+            "You are a FINAL ANSWER SYNTHESIZER.\n"
+            "Synthesize the single final answer to the parent question from subtask results.\n"
+            "Rules:\n"
+            "- Return ONLY the final answer string.\n"
+            "- No explanations, no bullets, no JSON.\n"
+            "- Use ONLY provided subtask answers; do not invent facts.\n"
+            "- If insufficient, return exactly: UNKNOWN\n"
+        )
+
+        resp = self.runner.run(
+            [
+                {"role": "system", "content": sys_prompt},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {"question": question, "subtask_results": items},
+                        ensure_ascii=False,
+                    ),
+                },
+            ],
+            tools,
+            kb=kb,
+            node_id=node_id,
+            label="llm_derive_root_answer",
+            schema=None,
+        )
+
+        out = (resp.output_text or "").strip()
+        return out if out else "UNKNOWN"
 
     # ---------- Internal: decomposition (subtasks only; ban verify/check subtasks) ----------
     def _decompose_subtasks_only(
@@ -396,7 +447,7 @@ class LLMSupervisorV2:
             "Solve the CURRENT subtask.\n"
             "Return ONLY the final answer string.\n"
             "No explanations, no bullets, no JSON.\n"
-            "If truly unknown, return exactly: UNKNOWN\n"
+            "Do not return blank string. If truly unknown, return exactly: UNKNOWN\n"
         )
 
         user_text = (
@@ -424,21 +475,22 @@ class LLMSupervisorV2:
             label="llm_solve_subtask",
             schema=None,
         )
+        logger.info(f"LLM solve subtask once raw resp:\n{resp}")
 
         answer = (resp.output_text or "").strip()
-        tool_name = None
-        tool_params = None
         tool_calls = getattr(resp, "_executed_tool_calls", None) or []
-        if tool_calls:
-            last = tool_calls[-1]
-            tool_name = last.get("name") or None
-            args = last.get("arguments")
-            if args is not None:
-                tool_params = json.dumps(args, ensure_ascii=False, sort_keys=True)
-
+        contrib = self._select_key_tool_call(
+            tool_calls=tool_calls,
+            final_answer=answer,
+            runner=self.runner,
+            tools=tools,
+            kb=kb,
+            node_id=None,
+        )
+        tool_name, tool_params = contrib.tool_name, contrib.tool_args
         return answer, tool_name, tool_params
 
-    # ---------- Semantic verifier (internal; NOT a subtask) ----------
+    # ---------- Semantic verifier ----------
     def verify_semantic(
         self,
         question: str,
@@ -625,9 +677,113 @@ class LLMSupervisorV2:
 
         concise_specs = "\n".join(
             [
-                f"{s.subtask}: {s.expected_answer}\n{s.expected_tool}: {s.expected_tool_params}\n"
+                f"Subtask: {s.subtask}\nAnswer: {s.expected_answer}\nTool: {s.expected_tool}\nTool Params: {s.expected_tool_params}\n"
                 for s in out
             ]
         )
-        logger.info(f"Superviser Recunstructed.\n:{concise_specs}")
+        logger.info(f"Superviser Recunstructed.\n{concise_specs}")
         return out
+
+    def _select_key_tool_call(
+        self,
+        tool_calls: List[Dict[str, Any]],
+        final_answer: str,
+        runner: LLMRunnerWithTools,
+        tools: ToolRegistry,
+        kb: Optional[JsonlKB],
+        node_id: str,
+    ) -> ToolContribution:
+        """
+        Simplified: return only (tool_name, tool_args) for the single tool call
+        that the LLM judges as most critical to produce final_answer.
+        """
+
+        # quick fallback when no tool calls
+        if not tool_calls:
+            return ToolContribution(tool_name=None, tool_args=None)
+
+        # prepare readable list
+        enumerated = []
+        for i, tc in enumerate(tool_calls):
+            name = (
+                tc.get("name") or tc.get("tool_name") or tc.get("tool") or "<unknown>"
+            )
+            args = tc.get("arguments", tc.get("args", tc.get("parameters", None)))
+            result = tc.get("result", tc.get("output", tc.get("response", None)))
+            try:
+                args_s = (
+                    json.dumps(args, ensure_ascii=False, sort_keys=True)
+                    if args is not None
+                    else None
+                )
+            except Exception:
+                args_s = str(args) if args is not None else None
+            try:
+                res_s = (
+                    json.dumps(result, ensure_ascii=False, sort_keys=True)
+                    if result is not None
+                    else None
+                )
+            except Exception:
+                res_s = str(result) if result is not None else None
+            enumerated.append({"idx": i, "name": name, "args": args_s, "result": res_s})
+
+        # JSON schema: only tool_name/tool_args
+        schema = {
+            "type": "json_schema",
+            "name": "select_key_tool_call_minimal",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "tool_name": {"type": ["string", "null"]},
+                    "tool_args": {"type": ["string", "null"]},
+                },
+                "required": ["tool_name", "tool_args"],
+                "additionalProperties": False,
+            },
+        }
+
+        sys_prompt = (
+            "You are an ANALYZER. Given a final answer and a numbered list of executed tool calls "
+            "(each has idx, name, args, result), return ONLY a JSON object with keys: "
+            "'tool_name' and 'tool_args'. Choose the single tool call most critical for producing "
+            "the final answer and set tool_name to its name and tool_args to a JSON-stringified "
+            "version of its arguments. If none, return nulls."
+        )
+
+        user_payload = {"final_answer": final_answer, "tool_calls": enumerated}
+        messages = [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+        ]
+
+        try:
+            resp = runner.run(
+                messages,
+                tools,
+                kb=kb,
+                node_id=node_id,
+                label="llm_select_key_tool_call_minimal",
+                schema=schema,
+            )
+            data = json.loads(resp.output_text or "{}")
+            tool_name = data.get("tool_name")
+            tool_args = data.get("tool_args")
+            # if LLM returns valid tool_name/tool_args, trust it (but validate)
+            if tool_name:
+                return ToolContribution(tool_name=tool_name, tool_args=tool_args)
+        except Exception:
+            # fall through to heuristic fallback below
+            pass
+
+        # Heuristic fallback: pick last tool_call that has a non-empty result; else last tool_call
+        picked = None
+        for i in range(len(enumerated) - 1, -1, -1):
+            if enumerated[i]["result"] not in (None, "", "null", "[]", "{}"):
+                picked = i
+                break
+        if picked is None:
+            picked = len(enumerated) - 1
+        tc = enumerated[picked]
+        return ToolContribution(tool_name=tc["name"], tool_args=tc["args"])
