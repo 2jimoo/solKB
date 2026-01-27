@@ -6,7 +6,7 @@ from collections import defaultdict
 from agent_system.kb import JsonlKB
 from agent_system.models import TaskNode
 from agent_system.tools.registry import ToolRegistry
-from agent_system.llm.supervisor import LLMSupervisor
+from agent_system.llm import LLMSupervisor
 from agent_system.slm.runner_hf import SLMRunnerHF
 
 import logging

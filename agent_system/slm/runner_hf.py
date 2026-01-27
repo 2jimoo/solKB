@@ -82,7 +82,7 @@ class SLMRunnerHF:
         tools: ToolRegistry,
         kb: Optional[JsonlKB] = None,
         node_id: Optional[str] = None,
-        max_tool_turns: int = 6,
+        max_tool_turns: int = 10,
     ) -> Dict[str, Any]:
         system = (
             "You are a problem solver. You MUST output valid JSON ONLY.\n"
@@ -146,7 +146,7 @@ class SLMRunnerHF:
                     out = tools.call(tool_name, args)
                 except Exception as e:
                     out = {"error": str(e), "tool_name": tool_name, "arguments": args}
-                logger.debug(f"tool call respose:\n{out}")
+                logger.info(f"[SLM] tool {tool_name} called with {args}")
 
                 if kb and node_id:
                     kb.append(

@@ -28,6 +28,7 @@ class LLMRunnerWithTools:
         schema: Optional[Dict[str, Any]] = None,
         max_steps: int = 8,
     ):
+        executed_tool_calls: List[Dict[str, Any]] = []
         # --- first call ---
         kwargs = dict(
             model=self.model,
@@ -80,6 +81,11 @@ class LLMRunnerWithTools:
 
             # no tool calls => done
             if not tool_calls:
+                try:
+                    setattr(resp, "_executed_tool_calls", executed_tool_calls)
+                except Exception:
+                    pass
+
                 if kb and node_id:
                     kb.append(
                         {
@@ -134,6 +140,12 @@ class LLMRunnerWithTools:
                     )
 
                 # IMPORTANT: tool_call_id should match call_id if present (your log shows call_id='call_...')
+                executed_tool_calls.append(
+                    {
+                        "name": tc.get("name"),
+                        "arguments": args,
+                    }
+                )
                 tool_results.append(
                     {
                         "type": "function_call_output",
@@ -154,6 +166,11 @@ class LLMRunnerWithTools:
             time.sleep(0.5)
 
         # if max steps reached
+        try:
+            setattr(resp, "_executed_tool_calls", executed_tool_calls)
+        except Exception:
+            pass
+
         if kb and node_id:
             kb.append(
                 {

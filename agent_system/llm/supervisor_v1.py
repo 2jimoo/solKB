@@ -44,11 +44,30 @@ class LLMSupervisor:
         messages = [
             {
                 "role": "system",
-                "content": (
-                    "You make a easier and more concise plan for a smaller task agent based on reference plannings of a strong agent.\n"
-                    "For each planning step, explicitly state the relevant rules or information derived from the problem that are needed to complete that step.\n"
-                    'Output ONLY valid JSON matching the schema: {"steps": ["...", ...]}.'
-                ),
+                "content": """
+                    You are given a reference planning produced by a strong reasoning agent.
+                    Your task is to generate a simplified and executable plan for a smaller task agent
+                    that directly solves the root question.
+
+                    Instructions:
+                    - Return the output as a JSON array of 1 to 5 strings.
+                    - Each string represents one planning step.
+                    - Each step must be a complete sentence.
+                    - Each step must be actionable (i.e., something an agent can directly execute).
+                    - Do NOT include sub-bullets or nested steps.
+                    - Do NOT restate the reference planning verbatim.
+                    - Remove meta-reasoning, delegation details, and internal tool discussions unless strictly necessary.
+                    - Preserve only the essential reasoning needed to solve the root question.
+                    - Focus on WHAT to do, not HOW to reason internally.
+                    - If multiple steps can be merged without losing clarity, merge them.
+
+                    The final plan should:
+                    - Use only information and constraints implied by the reference planning.
+                    - Be sufficient for a smaller agent to reach the final answer.
+                    - End with producing the final answer required by the root question.
+
+                    Return ONLY the JSON array, and nothing else.
+                """,
             },
             {
                 "role": "user",
@@ -141,18 +160,97 @@ class LLMSupervisor:
         data = json.loads(resp.output_text)
         return [s.strip() for s in data["subtasks"] if s.strip()]
 
-    def verify(
+    def verify_final(
         self,
-        question: str,
+        root_question: str,
         proposed_answer: str,
-        tools: ToolRegistry,
-        kb: JsonlKB,
+        tools,
+        kb,
         node_id: str,
         reference_answer: Optional[str] = None,
     ) -> Dict[str, Any]:
+        # FINAL 전용 스키마
         schema = {
             "type": "json_schema",
-            "name": "verification",
+            "name": "verification_final",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "verdict": {
+                        "type": "string",
+                        "enum": ["final_correct", "incorrect", "insufficient"],
+                    },
+                    "reason": {"type": "string"},
+                    "evidence": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "maxItems": 6,
+                    },
+                },
+                "required": ["verdict", "reason", "evidence"],
+                "additionalProperties": False,
+            },
+        }
+
+        # FINAL 전용 프롬프트/메시지
+        messages = [
+            {
+                "role": "system",
+                "content": """
+                    You are a STRICT VERIFIER for another model's output.
+                    Your role is ONLY to judge whether the model's answer is semantically equivalent to the actual FINAL answer.
+
+                    You MAY call tools (serpapi_search, jina_read_url, calc) ONLY to CHECK whether the given answer is correct.
+
+                    You MUST NOT solve the task yourself.
+                    You MUST NOT provide the correct answer, partial answers, or hints toward the solution.
+                    You MUST NOT suggest what should be done next.
+
+                    Decision Criteria:
+                    - final_correct: The model’s answer is semantically equivalent to the actual final answer (complete and correct).
+                    - incorrect: The model’s answer is not equivalent to the actual final answer.
+                    - insufficient: Not enough information to verify correctness.
+                """.strip(),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "root_question": root_question,
+                        "final_model_answer": proposed_answer,
+                        "actual_root_answer": reference_answer,
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ]
+
+        resp = self.runner.run(
+            messages,
+            tools,
+            kb=kb,
+            node_id=node_id,
+            label="llm_verify_final",
+            schema=schema,
+        )
+        logger.debug(f"verify_final results:\n{resp.output_text}")
+        return json.loads(resp.output_text)
+
+    def verify_intermediate(
+        self,
+        root_question: str,
+        subtask_question: str,
+        proposed_answer: str,
+        tools,
+        kb,
+        node_id: str,
+        reference_answer: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        # INTERMEDIATE 전용 스키마
+        schema = {
+            "type": "json_schema",
+            "name": "verification_intermediate",
             "strict": True,
             "schema": {
                 "type": "object",
@@ -177,47 +275,52 @@ class LLMSupervisor:
                 "additionalProperties": False,
             },
         }
+
+        # INTERMEDIATE 전용 프롬프트/메시지
         messages = [
             {
                 "role": "system",
                 "content": """
                     You are a STRICT VERIFIER for another model's output.
-                    Your role is ONLY to judge whether the model's answer is semantically equivalent to the actual answer.
+                    Your role is ONLY to judge whether the model's answer correctly solves the INTERMEDIATE subtask question.
+                    Judge correctness for the subtask (not the overall root), using any provided reference if available.
+
+                    You MAY call tools (serpapi_search, jina_read_url, calc) ONLY to CHECK whether the given answer is correct.
 
                     You MUST NOT solve the task yourself.
                     You MUST NOT provide the correct answer, partial answers, or hints toward the solution.
                     You MUST NOT suggest what should be done next.
 
-                    You MAY call tools (serpapi_search, jina_read_url, calc) ONLY to CHECK whether the given answer is correct.
-
-                    Evaluation Rules:
-                    - Judge ONLY based on the given answer and verifiable facts.
-                    - Do NOT infer missing steps or complete incomplete reasoning.
-                    - Do NOT introduce new facts unless strictly necessary to explain why the answer is incorrect.
-
                     Decision Criteria:
-                    - final_correct: The model’s answer is semantically equivalent to the actual final answer (complete and correct).
-                    - partial_correct: The model’s answer is NOT equivalent to the actual final answer, but it contains one or more intermediate results/claims that are correct and relevant, while missing required parts or containing additional incorrect parts.
-                    - incorrect: The model’s answer is not equivalent to the actual final answer and does not contain any clearly correct intermediate results relevant to reaching it (or is too vague to verify).
-
-                """,
+                    - final_correct: The intermediate answer is correct for the subtask (treat as "correct").
+                    - partial_correct: The answer contains some correct intermediate results but is not fully correct.
+                    - incorrect: The answer does not correctly solve the subtask.
+                    - insufficient: Not enough information to verify correctness.
+                """.strip(),
             },
             {
                 "role": "user",
                 "content": json.dumps(
                     {
-                        "question": question,
-                        "model_answer": proposed_answer,
-                        "actual_answer": reference_answer,
+                        "root_question": root_question,
+                        "subtask_question": subtask_question,
+                        "subtask_model_answer": proposed_answer,
+                        "actual_root_answer": reference_answer,
                     },
                     ensure_ascii=False,
                 ),
             },
         ]
+
         resp = self.runner.run(
-            messages, tools, kb=kb, node_id=node_id, label="llm_verify", schema=schema
+            messages,
+            tools,
+            kb=kb,
+            node_id=node_id,
+            label="llm_verify_intermediate",
+            schema=schema,
         )
-        logger.debug(f"supervisor verifying results:\n{resp.output_text}")
+        logger.debug(f"verify_intermediate results:\n{resp.output_text}")
         return json.loads(resp.output_text)
 
     def synthesize(
@@ -234,6 +337,7 @@ class LLMSupervisor:
                 "content": (
                     "Synthesize a final answer from solved subtasks."
                     "Do NOT introduce new facts, assumptions, reasoning or tool calls."
+                    "Do NOT include actual answer."
                     "Return only the answer to the question, such as the year, numerical value, or name."
                 ),
             },
