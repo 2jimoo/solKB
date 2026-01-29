@@ -4,3 +4,4 @@ __pycache__/
 *.log
 # nohup python -m agent_system.main > agent_system.log 2>&1 &
 kb.jsonl
+/case_study

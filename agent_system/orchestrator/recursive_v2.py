@@ -38,7 +38,6 @@ class RecursiveSolverV2:
         max_depth: int = 6,
         max_tool_turns: int = 6,
         max_slm_attempts: int = 10,
-        require_all_subtasks: bool = True,
         keep_failed_history: int = 30,
         keep_sibling_ctx: int = 8,
     ):
@@ -50,7 +49,6 @@ class RecursiveSolverV2:
         self.max_depth = max_depth
         self.max_tool_turns = max_tool_turns
         self.max_slm_attempts = max_slm_attempts
-        self.require_all_subtasks = require_all_subtasks
         self.keep_failed_history = keep_failed_history
         self.keep_sibling_ctx = keep_sibling_ctx
 
@@ -72,7 +70,7 @@ class RecursiveSolverV2:
             return (
                 f"Parent question:\n{parent_question}\n\n"
                 f"Current subtask:\n{current_subtask}\n\n"
-                f"Used Tool:{subtask.expected_tool}\nUsed Tool Parameter:{subtask.expected_tool_params}\n"
+                # f"Used Tool:{subtask.expected_tool}\nUsed Tool Parameter:{subtask.expected_tool_params}\n"
                 "Answer ONLY the current subtask."
             )
 
@@ -88,14 +86,14 @@ class RecursiveSolverV2:
             return (
                 f"Parent question:\n{parent_question}\n\n"
                 f"Current subtask:\n{current_subtask}\n\n"
-                f"Used Tool:{subtask.expected_tool}\nUsed Tool Parameter:{subtask.expected_tool_params}\n"
+                # f"Used Tool:{subtask.expected_tool}\nUsed Tool Parameter:{subtask.expected_tool_params}\n"
                 "Answer ONLY the current subtask."
             )
 
         return (
             f"Parent question:\n{parent_question}\n\n"
             f"Current subtask:\n{current_subtask}\n\n"
-            f"Used Tool:{subtask.expected_tool}\nUsed Tool Parameter:{subtask.expected_tool_params}\n"
+            # f"Used Tool:{subtask.expected_tool}\nUsed Tool Parameter:{subtask.expected_tool_params}\n"
             "Solved sibling subtasks (treat as facts; do NOT redo unless necessary):\n"
             f"{ctx_block}\n\n"
             "Answer ONLY the current subtask."
@@ -134,14 +132,8 @@ class RecursiveSolverV2:
         sibling_solved: List[Dict[str, str]],
         actual_answer=None,
     ) -> (int, List[Any], bool):
-        """
-        Returns:
-          -1 : failed
-          >=0: solved -> max derived depth (solvability)
-        """
         if depth >= self.max_depth:
             return -1, None, True
-
         logger.info(
             f"====================================== DEPTH {depth} ======================================"
         )
@@ -162,19 +154,6 @@ class RecursiveSolverV2:
         if subtasks is None:
             logger.info(f"[{depth}] Superviser Couldn't Solve.")
             return -1, None, True
-
-        self.kb.append(
-            {
-                "event": "plan",
-                "node_id": node_id,
-                "depth": depth,
-                "question": parent_question,
-                "subtasks": [
-                    {"subtask": s.subtask, "expected_answer": s.expected_answer or ""}
-                    for s in subtasks
-                ],
-            }
-        )
         subtasks_str = "\n".join(
             [
                 f"SubTask: {s.subtask}\nExpected Answer: {s.expected_answer}\n"
@@ -253,22 +232,6 @@ class RecursiveSolverV2:
                     }
                 )
 
-            self.kb.append(
-                {
-                    "event": "attempt",
-                    "node_id": attempt_id,
-                    "parent_node_id": node_id,
-                    "depth": depth + 1,
-                    "parent_question": parent_question,
-                    "subtask": s.subtask,
-                    "expected_answer": s.expected_answer or "",
-                    "proposed_answer": proposed,
-                    "verdict": v_st.verdict,
-                    "reason": v_st.reason,
-                    "evidence": v_st.evidence,
-                }
-            )
-
             if v_st.verdict == "correct":
                 logger.info(f"[{depth}-{sidx}] SLM Corrected Partially.")
                 local_siblings.append({"subtask": s.subtask, "answer": proposed})
@@ -305,26 +268,16 @@ class RecursiveSolverV2:
                     -self.keep_failed_history :
                 ]
 
-            self.kb.append(
-                {
-                    "event": "recurse",
-                    "node_id": attempt_id,
-                    "parent_node_id": node_id,
-                    "depth": depth + 1,
-                    "subtask": s.subtask,
-                    "reason": v_st.reason or v_st.verdict,
-                }
-            )
-
-            child_solvability, _, is_finished = self._solve_node(
+            child_solvability, child_records, is_finished = self._solve_node(
                 root_question=root_question,
                 parent_question=s.subtask,
                 reference=reference,
                 expected_answer=s.expected_answer,
                 depth=depth + 1,
-                # ✅ 재귀로 들어갈 때도 “현재까지 solved된 형제 컨텍스트”를 전달하면 안정적
                 sibling_solved=local_siblings,
             )
+            if child_records:
+                solved_records.extend(child_records)
             logger.info(
                 f"[{depth}-{sidx}] SLM failed and recursed({child_solvability})."
             )
@@ -358,30 +311,9 @@ class RecursiveSolverV2:
                 child_solvabilities.append(child_solvability)
                 continue
 
-            if self.require_all_subtasks:
-                return -1, None, True
-
-        # 4) Decide success and compute solvability
-        if self.require_all_subtasks:
-            ok = len(subtasks) > 0 and len(solved_records) == len(subtasks)
-        else:
-            ok = len(solved_records) > 0
-
-        if not ok:
-            return -1
-
         max_derived_depth = max([depth] + child_solvabilities)
-
-        # 5) record (only when all subtasks solved at this node)
-        self.kb.append(
-            {
-                "event": "done",
-                "node_id": node_id,
-                "depth": depth,
-                "question": parent_question,
-                "records": solved_records,
-                "solvability": max_derived_depth,
-            }
-        )
-
-        return max_derived_depth, solved_records, True
+        return (
+            max_derived_depth,
+            solved_records,
+            False,
+        )  # 중간에 최종 정답이나 최종 실패 도달X -> 재귀 완료

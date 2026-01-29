@@ -52,13 +52,6 @@ class LLMSupervisorV2:
         max_rounds: int = 5,
         max_solve_attempts_per_subtask: int = 2,
     ) -> List[SubtaskSpec]:
-        """
-        Returns: List[SubtaskSpec(subtask, expected_answer)]
-        - expected_answer is obtained by actually solving each subtask with LLM.
-        - If actual_answer is provided, this function loops until semantic match (or max_rounds).
-        """
-        sibling_solved = sibling_solved or []
-
         rounds = max_rounds if actual_answer is not None else 1
         last_specs: List[SubtaskSpec] = []
 
@@ -79,19 +72,6 @@ class LLMSupervisorV2:
             subtasks_str = "\n".join(subtasks)
             logger.info(f"[{r}]Superviser Plan:\n{subtasks_str}")
 
-            if kb:
-                kb.append(
-                    {
-                        "event": "supervisor_plan",
-                        "node_id": plan_id,
-                        "parent_node_id": node_id,
-                        "round": r + 1,
-                        "depth": depth,
-                        "question": question,
-                        "subtasks": subtasks,
-                    }
-                )
-
             # 2) solve each subtask to fill expected_answer
             local_siblings = list(sibling_solved[-keep_sibling_ctx:])
             specs: List[SubtaskSpec] = []
@@ -111,21 +91,6 @@ class LLMSupervisorV2:
                         sibling_solved=local_siblings,
                         wrong_attempts=wrong_attempts,
                     )
-
-                    if kb:
-                        kb.append(
-                            {
-                                "event": "supervisor_solve",
-                                "node_id": solve_id,
-                                "parent_node_id": node_id,
-                                "round": r + 1,
-                                "depth": depth + 1,
-                                "parent_question": question,
-                                "subtask": st,
-                                "answer": ans,
-                                "attempt": aidx + 1,
-                            }
-                        )
                     logger.info(
                         f"[{r}-{aidx}]Superviser Solve\nSubtask:{st}\nAnswer:{ans}\nTool:{exp_tool}, {exp_tool_params}"
                     )
@@ -149,23 +114,7 @@ class LLMSupervisorV2:
                     local_siblings = local_siblings[-keep_sibling_ctx:]
                 else:
                     break
-
             last_specs = specs
-
-            if kb:
-                kb.append(
-                    {
-                        "event": "supervisor_record",
-                        "node_id": node_id,
-                        "round": r + 1,
-                        "depth": depth,
-                        "question": question,
-                        "subtask_expected_answers": [
-                            {"subtask": s.subtask, "expected_answer": s.expected_answer}
-                            for s in specs
-                        ],
-                    }
-                )
 
             # 3) if no actual_answer => done
             # 4) derive a single "root answer" from the specs, then semantic-verify
@@ -191,23 +140,6 @@ class LLMSupervisorV2:
                 node_id=ver_id,
             )
             logger.info(f"[{r}]Superviser Verified.\n{v.verdict}: {v.reason}")
-
-            if kb:
-                kb.append(
-                    {
-                        "event": "supervisor_verify",
-                        "node_id": ver_id,
-                        "parent_node_id": node_id,
-                        "round": r + 1,
-                        "depth": depth,
-                        "question": question,
-                        "derived_answer": derived,
-                        "actual_answer": actual_answer,
-                        "verdict": v.verdict,
-                        "reason": v.reason,
-                        "evidence": v.evidence,
-                    }
-                )
 
             if v.verdict == "correct":
                 logger.info(f"[{r}]Superviser Corrected.")
@@ -329,14 +261,14 @@ class LLMSupervisorV2:
             "prove",
         ]
 
-        # ✅ 핵심: "마지막 subtask가 parent question 최종답을 산출" 강제
-        # (actual_answer loop에서 derived 정책이 last subtask라서 품질이 크게 좋아짐)
+        # 마지막 subtask가 parent question 최종답 강제
         common_constraints = (
             "Hard constraints:\n"
             f"- NEVER create verification/check subtasks (avoid words like: {', '.join(banned)}).\n"
             "- Each subtask must directly advance solving (derive/compute/retrieve needed intermediate facts).\n"
             "- NO subtask should be 'verify/confirm the answer'. Checking is internal, not a separate subtask.\n"
             "- The LAST subtask MUST directly produce the FINAL answer to the parent question.\n"
+            "- Do not include the answer of subtask in any subtask.\n"
             "- Each subtask must be ONE actionable sentence.\n"
         )
 
@@ -475,7 +407,7 @@ class LLMSupervisorV2:
             label="llm_solve_subtask",
             schema=None,
         )
-        logger.info(f"LLM solve subtask once raw resp:\n{resp}")
+        logger.debug(f"LLM solve subtask once raw resp:\n{resp}")
 
         answer = (resp.output_text or "").strip()
         tool_calls = getattr(resp, "_executed_tool_calls", None) or []

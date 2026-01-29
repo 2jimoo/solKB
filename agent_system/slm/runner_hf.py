@@ -14,14 +14,6 @@ logger = logging.getLogger(__name__)
 
 
 class SLMRunnerHF:
-    """
-    HF local Qwen3 runner that 'calls tools' via JSON-only action protocol.
-
-    Required output (JSON ONLY):
-      {"action":"TOOL_CALL","tool_name":"...","arguments":{...}}
-      {"action":"FINAL","answer":"..."}
-    """
-
     def __init__(
         self,
         model_id: str = "Qwen/Qwen3-4B-Instruct-2507",
@@ -76,112 +68,204 @@ class SLMRunnerHF:
         gen_ids = out[0][input_ids.shape[-1] :]
         return self.tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
 
+    # def solve_with_tools(
+    #     self,
+    #     question: str,
+    #     tools: ToolRegistry,
+    #     kb: Optional[JsonlKB] = None,
+    #     node_id: Optional[str] = None,
+    #     max_slm_attempts: int = 10,
+    #     max_tool_turns: int = 10,
+    #     slm_attempt_histories=None,
+    # ) -> Dict[str, Any]:
+    #     system = (
+    #         "You are a problem solver. You MUST output valid JSON ONLY.\n"
+    #         "Choose exactly one:\n"
+    #         'A) {"action":"TOOL_CALL","tool_name":"<name>","arguments":{...}}\n'
+    #         'B) {"action":"FINAL","answer":"<final answer>"}\n'
+    #         "If web facts are needed, call serpapi_search then jina_read_url on the best links."
+    #         f"[Attempt History]{slm_attempt_histories}"
+    #     )
+
+    #     for attempt in range(max_slm_attempts):
+    #         messages = [
+    #             {"role": "system", "content": system},
+    #             {
+    #                 "role": "user",
+    #                 "content": f"Question:\n{question}\n\nAvailable tools:\n{tools.list_names()}",
+    #             },
+    #         ]
+    #         for turn in range(max_tool_turns):
+    #             raw = self._generate(messages)
+    #             logger.info(f"SLM raw respose:\n{raw}")
+    #             try:
+    #                 action = json.loads(raw)
+    #             except json.JSONDecodeError:
+    #                 messages.append({"role": "assistant", "content": raw})
+    #                 messages.append(
+    #                     {"role": "user", "content": "Output MUST be valid JSON. Retry."}
+    #                 )
+    #                 continue
+
+    #             if action.get("action") == "FINAL":
+    #                 return {
+    #                     "status": "final",
+    #                     "answer": action.get("answer", "")
+    #                 }
+
+    #             if action.get("action") == "TOOL_CALL":
+    #                 tool_name = action.get("tool_name")
+    #                 args = action.get("arguments") or {}
+    #                 try:
+    #                     out = tools.call(tool_name, args)
+    #                 except Exception as e:
+    #                     out = {"error": str(e), "tool_name": tool_name, "arguments": args}
+    #                 logger.info(f"[SLM] tool {tool_name} called with {args}")
+    #                 messages.append(
+    #                     {
+    #                         "role": "assistant",
+    #                         "content": json.dumps(action, ensure_ascii=False),
+    #                     }
+    #                 )
+    #                 messages.append(
+    #                     {
+    #                         "role": "user",
+    #                         "content": (
+    #                             f"Tool result for {tool_name}:\n{json.dumps(out, ensure_ascii=False)}\n\n"
+    #                             "Continue and respond with FINAL JSON (or another TOOL_CALL if still needed)."
+    #                         ),
+    #                     }
+    #                 )
+    #                 continue
+
+    #             messages.append({"role": "assistant", "content": raw})
+    #             messages.append(
+    #                 {
+    #                     "role": "user",
+    #                     "content": "Invalid action. Output JSON with action TOOL_CALL or FINAL.",
+    #                 }
+    #             )
+    #     return {"status": "tool_turn_limit", "answer": ""}
+
     def solve_with_tools(
         self,
         question: str,
         tools: ToolRegistry,
         kb: Optional[JsonlKB] = None,
         node_id: Optional[str] = None,
-        max_tool_turns: int = 10,
+        max_slm_attempts: int = 10,
+        max_tool_turns: int = 5,
         slm_attempt_histories=None,
     ) -> Dict[str, Any]:
-        system = (
+        history: List[Dict[str, Any]] = []
+        if slm_attempt_histories:
+            history.append(
+                {"type": "external_attempt_history", "data": slm_attempt_histories}
+            )
+        system_base = (
             "You are a problem solver. You MUST output valid JSON ONLY.\n"
-            "Choose exactly one:\n"
-            'A) {"action":"TOOL_CALL","tool_name":"<name>","arguments":{...}}\n'
-            'B) {"action":"FINAL","answer":"<final answer>"}\n'
-            "If web facts are needed, call serpapi_search then jina_read_url on the best links."
-            f"[Attempt History]{slm_attempt_histories}"
+            "At every step, you MUST include your best current answer in 'answer_so_far'.\n"
+            "Choose exactly one JSON shape:\n"
+            'A) {"action":"TOOL_CALL","tool_name":"<name>","arguments":{...},"answer_so_far":"<best current answer>"}\n'
+            'B) {"action":"FINAL","answer":"<final answer>","answer_so_far":"<best current answer>"}\n'
+            "Rules:\n"
+            "- After receiving any tool result, update 'answer_so_far' using that result.\n"
+            "- If more info is needed, respond with TOOL_CALL. Otherwise respond with FINAL.\n"
+            "- Output JSON only. No extra text.\n"
         )
 
+        last_answer_so_far = ""
+        for attempt in range(max_slm_attempts):
+            system = (
+                system_base + f"\n[History]\n{json.dumps(history, ensure_ascii=False)}"
+            )
+            messages = [
+                {"role": "system", "content": system},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Question:\n{question}\n\n"
+                        f"Available tools:\n{tools.list_names()}\n\n"
+                        "Respond with TOOL_CALL or FINAL in JSON."
+                    ),
+                },
+            ]
+            for turn in range(max_tool_turns):
+                raw = self._generate(messages)
+                logger.info(f"SLM raw respose:\n{raw}")
+                try:
+                    action = json.loads(raw)
+                except json.JSONDecodeError:
+                    logger.info(f"SLM returned bad json, retry.")
+                    continue
+
+                if action.get("action") == "FINAL":
+                    final_answer = action.get("answer", "")
+                    return {
+                        "status": "final",
+                        "answer": final_answer,
+                        "answer_so_far": last_answer_so_far,
+                        "history": history,
+                    }
+
+                if action.get("action") == "TOOL_CALL":
+                    tool_name = action.get("tool_name")
+                    args = action.get("arguments") or {}
+                    try:
+                        out = tools.call(tool_name, args)
+                    except Exception as e:
+                        out = {
+                            "error": str(e),
+                            "tool_name": tool_name,
+                            "arguments": args,
+                        }
+                    logger.info(f"[SLM] tool {tool_name} called with {args}")
+
+                    history.append(
+                        {
+                            "type": "tool_result",
+                            "attempt": attempt,
+                            "turn": turn,
+                            "tool_name": tool_name,
+                            "arguments": args,
+                            "output": out,
+                        }
+                    )
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": json.dumps(action, ensure_ascii=False),
+                        }
+                    )
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                f"Tool result for {tool_name}:\n{json.dumps(out, ensure_ascii=False)}\n\n"
+                                "Now update 'answer_so_far' using this tool result.\n"
+                                "If you still need more info, respond with TOOL_CALL.\n"
+                                "Otherwise respond with FINAL.\n"
+                                "Remember: output JSON only."
+                            ),
+                        }
+                    )
+                    continue
+
+        # 최대 횟수 도달 강제 답변
+        system = system_base + f"\n[History]\n{json.dumps(history, ensure_ascii=False)}"
         messages = [
             {"role": "system", "content": system},
             {
                 "role": "user",
-                "content": f"Question:\n{question}\n\nAvailable tools:\n{tools.list_names()}",
+                "content": (
+                    f"Question:\n{question}\n\n"
+                    "Respond final answer based on histories."
+                ),
             },
         ]
-
-        trace: List[Dict[str, Any]] = []
-        for turn in range(max_tool_turns):
-            raw = self._generate(messages)
-            logger.debug(f"raw respose:\n{raw}")
-            trace.append({"turn": turn, "slm_raw": raw})
-
-            if kb and node_id:
-                kb.append(
-                    {"event": "slm_raw", "task_id": node_id, "turn": turn, "raw": raw}
-                )
-
-            try:
-                action = json.loads(raw)
-            except json.JSONDecodeError:
-                messages.append({"role": "assistant", "content": raw})
-                messages.append(
-                    {"role": "user", "content": "Output MUST be valid JSON. Retry."}
-                )
-                continue
-
-            if action.get("action") == "FINAL":
-                return {
-                    "status": "final",
-                    "answer": action.get("answer", ""),
-                    "trace": trace,
-                }
-
-            if action.get("action") == "TOOL_CALL":
-                tool_name = action.get("tool_name")
-                args = action.get("arguments") or {}
-
-                if kb and node_id:
-                    kb.append(
-                        {
-                            "event": "slm_tool_call",
-                            "task_id": node_id,
-                            "tool_name": tool_name,
-                            "arguments": args,
-                        }
-                    )
-
-                try:
-                    out = tools.call(tool_name, args)
-                except Exception as e:
-                    out = {"error": str(e), "tool_name": tool_name, "arguments": args}
-                logger.info(f"[SLM] tool {tool_name} called with {args}")
-
-                if kb and node_id:
-                    kb.append(
-                        {
-                            "event": "slm_tool_result",
-                            "task_id": node_id,
-                            "tool_name": tool_name,
-                            "output": out,
-                        }
-                    )
-
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": json.dumps(action, ensure_ascii=False),
-                    }
-                )
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Tool result for {tool_name}:\n{json.dumps(out, ensure_ascii=False)}\n\n"
-                            "Continue and respond with FINAL JSON (or another TOOL_CALL if still needed)."
-                        ),
-                    }
-                )
-                continue
-
-            messages.append({"role": "assistant", "content": raw})
-            messages.append(
-                {
-                    "role": "user",
-                    "content": "Invalid action. Output JSON with action TOOL_CALL or FINAL.",
-                }
-            )
-
-        return {"status": "tool_turn_limit", "answer": "", "trace": trace}
+        last_answer_so_far = self._generate(messages)
+        return {
+            "status": "attempt_limit",
+            "answer": last_answer_so_far,
+            "history": history,
+        }
