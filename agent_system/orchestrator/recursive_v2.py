@@ -164,20 +164,13 @@ class RecursiveSolverV2:
 
         solved_records: List[Dict[str, Any]] = []
         child_solvabilities: List[int] = []
-
-        # local_siblings accumulates only within this node (this is what you want)
-        local_siblings: List[Dict[str, str]] = list(
-            sibling_solved[-self.keep_sibling_ctx :]
-        )
-
         # 2) Execute each subtask
         for sidx, s in enumerate(subtasks):
             attempt_id = self._new_node_id()
-
             exec_q = self._build_exec_question(
                 parent_question=parent_question,
                 subtask=s,
-                sibling_solved=local_siblings,
+                sibling_solved=solved_records,
             )
 
             slm_attempts = 0
@@ -208,9 +201,20 @@ class RecursiveSolverV2:
                 logger.info(
                     f"[{depth}-{sidx}({slm_attempts})] LLM Verify SubTask\n verdict:{v_st.verdict}\n reason:{v_st.reason}\n evidence:{v_st.evidence}"
                 )
-
-                # Early stop
-                v_final = self.supervisor.verify_semantic(
+                # Early stop - par
+                v_par = self.supervisor.verify_semantic(
+                    question=parent_question,
+                    proposed_answer=proposed,
+                    actual_answer=expected_answer,
+                    tools=self.tools,
+                    kb=self.kb,
+                    node_id=attempt_id,
+                )
+                logger.info(
+                    f"[{depth}-{sidx}({slm_attempts})] LLM Verify Parent Task\n verdict:{v_par.verdict}\n reason:{v_par.reason}\n evidence:{v_par.evidence}"
+                )
+                # Early stop - root
+                v_root = self.supervisor.verify_semantic(
                     question=root_question,
                     proposed_answer=proposed,
                     actual_answer=actual_answer,
@@ -219,9 +223,13 @@ class RecursiveSolverV2:
                     node_id=attempt_id,
                 )
                 logger.info(
-                    f"[{depth}-{sidx}({slm_attempts})] LLM Verify Original Task\n verdict:{v_final.verdict}\n reason:{v_final.reason}\n evidence:{v_final.evidence}"
+                    f"[{depth}-{sidx}({slm_attempts})] LLM Verify Root Task\n verdict:{v_root.verdict}\n reason:{v_root.reason}\n evidence:{v_root.evidence}"
                 )
-                if v_st.verdict == "correct" or v_final.verdict == "correct":
+                if (
+                    v_st.verdict == "correct"
+                    or v_par.verdict == "correct"
+                    or v_root.verdict == "correct"
+                ):
                     break
                 slm_attempt_histories.append(
                     {
@@ -233,87 +241,71 @@ class RecursiveSolverV2:
                 )
 
             if v_st.verdict == "correct":
-                logger.info(f"[{depth}-{sidx}] SLM Corrected Partially.")
-                local_siblings.append({"subtask": s.subtask, "answer": proposed})
-                local_siblings = local_siblings[-self.keep_sibling_ctx :]
-
+                logger.info(f"[{depth}-{sidx}] SLM Corrected Subtask.")
                 solved_records.append(
                     {
                         "subtask": s.subtask,
-                        "answer": s.expected_answer,
+                        "answer": proposed,
                         "depth": depth + 1,
                     }
                 )
                 child_solvabilities.append(depth + 1)
                 continue
-            # Early stop
-            if v_final.verdict == "correct":
-                logger.info(f"[{depth}-{sidx}] SLM Corrected Ultaimately.")
+            # Early stop - parent
+            if v_par.verdict == "correct":
+                logger.info(f"[{depth}-{sidx}] SLM Corrected Parent.")
                 max_derived_depth = max([depth] + child_solvabilities)
                 solved_records.append(
                     {
                         "subtask": s.subtask,
-                        "answer": s.expected_answer,
+                        "answer": proposed,
+                        "depth": depth + 1,
+                    }
+                )
+                return max_derived_depth, solved_records, depth == 0
+            # Early stop - root
+            if v_root.verdict == "correct":
+                logger.info(f"[{depth}-{sidx}] SLM Corrected Root.")
+                max_derived_depth = max([depth] + child_solvabilities)
+                solved_records.append(
+                    {
+                        "subtask": s.subtask,
+                        "answer": proposed,
                         "depth": depth + 1,
                     }
                 )
                 return max_derived_depth, solved_records, True
 
             # 3) fail + recurse
+            logger.info(f"[{depth}-{sidx}] Subtask recursing started.")
             reference.failed_history.append(
-                {"task": s.subtask, "reason": v_st.reason or v_st.verdict}
+                {"task": s.subtask, "verdict": v_st.verdict, "reason": v_st.reason}
             )
-            if len(reference.failed_history) > self.keep_failed_history:
-                reference.failed_history = reference.failed_history[
-                    -self.keep_failed_history :
-                ]
-
             child_solvability, child_records, is_finished = self._solve_node(
                 root_question=root_question,
                 parent_question=s.subtask,
                 reference=reference,
                 expected_answer=s.expected_answer,
+                actual_answer=actual_answer,
                 depth=depth + 1,
-                sibling_solved=local_siblings,
+                sibling_solved=solved_records,
             )
-            if child_records:
-                solved_records.extend(child_records)
-            logger.info(
-                f"[{depth}-{sidx}] SLM failed and recursed({child_solvability})."
-            )
+            reference.failed_history.pop()
+            if child_solvability == -1:
+                logger.info(f"[{depth}-{sidx}] Subtask recursing failed.")
+                return -1, None, True
 
-            # Early stopped
+            logger.info(f"[{depth}-{sidx}] Subtask recursing succeeded.")
+            solved_records.extend(child_records)
+            child_solvabilities.append(child_solvability)
+
             if is_finished:
-                solved_records.append(
-                    {
-                        "subtask": s.subtask,
-                        "answer": s.expected_answer,
-                        "depth": depth + 1,
-                    }
-                )
-                child_solvabilities.append(child_solvability)
+                logger.info(f"[{depth}-{sidx}] Subtask recursed and early stopped.")
                 max_derived_depth = max([depth] + child_solvabilities)
                 return max_derived_depth, solved_records, True
 
-            if child_solvability != -1:
-                local_siblings.append(
-                    {"subtask": s.subtask, "answer": s.expected_answer}
-                )
-                local_siblings = local_siblings[-self.keep_sibling_ctx :]
-
-                solved_records.append(
-                    {
-                        "subtask": s.subtask,
-                        "answer": s.expected_answer,
-                        "depth": depth + 1,
-                    }
-                )
-                child_solvabilities.append(child_solvability)
-                continue
-
-        max_derived_depth = max([depth] + child_solvabilities)
         return (
-            max_derived_depth,
+            max([depth] + child_solvabilities),
             solved_records,
             False,
         )  # 중간에 최종 정답이나 최종 실패 도달X -> 재귀 완료

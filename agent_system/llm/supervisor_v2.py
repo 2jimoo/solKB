@@ -458,12 +458,19 @@ class LLMSupervisorV2:
         messages = [
             {
                 "role": "system",
-                "content": (
-                    "You are a STRICT SEMANTIC VERIFIER.\n"
-                    "Judge whether proposed answer is semantically equivalent to actual answer.\n"
-                    "Return ONLY verdict/reason/evidence in JSON.\n"
-                    "Do NOT provide the correct answer or hints.\n"
-                ),
+                "content": """
+                    You are a STRICT SEMANTIC VERIFIER.
+                    Judge whether the proposed answer is semantically equivalent to the actual answer.
+                    Do NOT provide the correct answer or hints.
+
+                    IMPORTANT RULES:
+                    - Evaluate ONLY the explicitly stated FINAL ANSWER in the proposed answer.
+                    - Reasoning, derivations, or explanations alone are NOT considered an answer.
+                    - If the proposed answer does NOT clearly state a final answer,
+                    you MUST return verdict = "incorrect",
+                    even if the reasoning is correct or implies the answer.
+                    - Do NOT infer, assume, or derive the final answer from reasoning.
+                """,
             },
             {
                 "role": "user",
@@ -558,10 +565,11 @@ class LLMSupervisorV2:
             ],
             "instructions": [
                 "Remove steps whose expected_answer is UNKNOWN or empty.",
-                "If multiple steps have the same expected_answer and later steps are just rephrasing/reporting/parsing, keep only ONE representative step.",
-                "Prefer the step that best reflects the actual information-gathering/computation, not a 'report the result' step.",
+                "ALWAYS keep exactly one final step that outputs/returns the final answer in the required format, even if it looks like reporting.",
+                "If multiple steps have the same expected_answer and later steps are just rephrasing/reporting/parsing, keep only ONE representative step (but do not drop the mandatory final-answer step).",
+                "Prefer the step that best reflects the actual information-gathering/computation, not a 'report the result' step, except the mandatory final-answer step.",
                 "Do not introduce new subtasks or new answers not present in last_specs.",
-                "Return 1 to 5 items max, only if they represent distinct information.",
+                "Return 1 to 5 items max, ensuring the mandatory final-answer step is included.",
             ],
         }
 

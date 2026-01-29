@@ -196,6 +196,9 @@ class SLMRunnerHF:
                 try:
                     action = json.loads(raw)
                 except json.JSONDecodeError:
+                    messages.append(
+                        {"role": "user", "content": "you returned bad json, retry."}
+                    )
                     logger.info(f"SLM returned bad json, retry.")
                     continue
 
@@ -259,7 +262,7 @@ class SLMRunnerHF:
                 "role": "user",
                 "content": (
                     f"Question:\n{question}\n\n"
-                    "Respond final answer based on histories."
+                    "Respond ONLY final answer based on histories. No reasoning, no explanation, no steps. If you are unsure, output UNKNOWN."
                 ),
             },
         ]
