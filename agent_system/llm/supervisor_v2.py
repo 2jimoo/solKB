@@ -69,7 +69,7 @@ class LLMSupervisorV2:
                 sibling_solved=sibling_solved,
                 max_items=max_items,
             )
-            subtasks_str = "\n".join(subtasks)
+            subtasks_str = "\n".join([f"SubTask:{s['subtask']}\n- Rationale:{s['rationale']}" for s in subtasks])
             logger.info(f"[{r}]Superviser Plan:\n{subtasks_str}")
 
             # 2) solve each subtask to fill expected_answer
@@ -79,12 +79,15 @@ class LLMSupervisorV2:
             for st in subtasks:
                 wrong_attempts: List[str] = []
                 ans = ""
+                st_text = st["subtask"]
+                st_rat = st.get("rationale", "")
 
                 for aidx in range(max_solve_attempts_per_subtask):
                     solve_id = self._new_node_id("solve_")
                     ans, exp_tool, exp_tool_params = self._solve_subtask_once(
                         parent_question=question,
-                        subtask=st,
+                        subtask=st_text,
+                        rationale=st_rat,
                         tools=tools,
                         kb=kb,
                         node_id=solve_id,
@@ -100,7 +103,8 @@ class LLMSupervisorV2:
                     wrong_attempts.append(ans or "")
                 specs.append(
                     SubtaskSpec(
-                        subtask=st,
+                        subtask=st_text,
+                        rationale=st_rat,
                         expected_answer=ans.strip(),
                         expected_tool=exp_tool,
                         expected_tool_params=exp_tool_params,
@@ -110,7 +114,7 @@ class LLMSupervisorV2:
                     f"[{r}]Superviser Solve\nSubtask:{st}\nAnswer:{ans}\nTool:{exp_tool}, {exp_tool_params}"
                 )
                 if ans and ans.strip().upper() != "UNKNOWN":
-                    local_siblings.append({"subtask": st, "answer": ans.strip()})
+                    local_siblings.append({"subtask": st_text, "rationale":st_rat, "answer": ans.strip()})
                     local_siblings = local_siblings[-keep_sibling_ctx:]
                 else:
                     break
@@ -174,6 +178,7 @@ class LLMSupervisorV2:
             {
                 "idx": i,
                 "subtask": s.subtask,
+                "rationale": s.rationale,
                 "expected_answer": s.expected_answer,
                 "expected_tool": s.expected_tool,
                 "expected_tool_params": s.expected_tool_params,
@@ -234,9 +239,17 @@ class LLMSupervisorV2:
                 "properties": {
                     "subtasks": {
                         "type": "array",
-                        "items": {"type": "string"},
                         "minItems": 1,
                         "maxItems": max_items,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "subtask": {"type": "string"},
+                                "rationale": {"type": "string"},
+                            },
+                            "required": ["subtask", "rationale"],
+                            "additionalProperties": False,
+                        },
                     }
                 },
                 "required": ["subtasks"],
@@ -270,6 +283,7 @@ class LLMSupervisorV2:
             "- The LAST subtask MUST directly produce the FINAL answer to the parent question.\n"
             "- Do not include the answer of subtask in any subtask.\n"
             "- Each subtask must be ONE actionable sentence.\n"
+            "- For EACH subtask, also provide a short rationale (1 sentence) explaining why it's needed and how it will be used.\n"
         )
 
         if is_root and reference.reference_planning:
@@ -321,42 +335,45 @@ class LLMSupervisorV2:
             schema=schema,
         )
 
-        data = json.loads(resp.output_text or "{}")
-        raw = [
-            s.strip()
-            for s in data.get("subtasks", [])
-            if isinstance(s, str) and s.strip()
-        ]
-
         # optional filter if model violates rule
-        filtered: List[str] = []
-        for s in raw:
-            low = s.lower()
-            if any(
-                w in low
-                for w in [
-                    "verify",
-                    "verification",
-                    "check",
-                    "confirm",
-                    "validate",
-                    "double-check",
-                    "cross-check",
-                    "re-check",
-                    "sanity check",
-                    "review",
-                ]
-            ):
-                continue
-            filtered.append(s)
+        banned = [
+            "verify",
+            "verification",
+            "check",
+            "confirm",
+            "validate",
+            "double-check",
+            "cross-check",
+            "re-check",
+            "sanity check",
+            "review",
+        ]
+        data = json.loads(resp.output_text or "{}")
+        raw_items = data.get("subtasks", [])
 
-        return (filtered or raw)[:max_items]
+        filtered = []
+        for it in raw_items:
+            if not isinstance(it, dict):
+                continue
+            sub = (it.get("subtask") or "").strip()
+            rat = (it.get("rationale") or "").strip()
+            if not sub:
+                continue
+
+            low = sub.lower()
+            if any(w in low for w in banned):
+                continue
+
+            filtered.append({"subtask": sub, "rationale": rat or ""})
+
+        return (filtered or raw_items)[:max_items]
 
     # ---------- Internal: solve subtask once ----------
     def _solve_subtask_once(
         self,
         parent_question: str,
         subtask: str,
+        rationale: str,
         tools: ToolRegistry,
         kb: Optional[JsonlKB],
         node_id: str,
@@ -385,6 +402,7 @@ class LLMSupervisorV2:
         user_text = (
             f"Parent question:\n{parent_question}\n\n"
             f"Current subtask:\n{subtask}\n\n"
+            f"Rationale (why this step exists / how to use it):\n{rationale}\n\n"
         )
         if ctx_block:
             user_text += (
@@ -516,7 +534,7 @@ class LLMSupervisorV2:
         - Keeps ONLY steps that add new information
         - Merges/removes repeated-answer steps like Extract/Parse/Report duplicates
         - Removes UNKNOWN by default
-        - Returns JSON-only list of {subtask, expected_answer}
+        - Returns JSON-only list of {subtask, rationale, expected_answer}
         """
 
         schema = {
@@ -534,12 +552,14 @@ class LLMSupervisorV2:
                             "type": "object",
                             "properties": {
                                 "subtask": {"type": "string"},
+                                "rationale": {"type": "string"},
                                 "expected_answer": {"type": "string"},
                                 "expected_tool": {"type": ["string", "null"]},
                                 "expected_tool_params": {"type": ["string", "null"]},
                             },
                             "required": [
                                 "subtask",
+                                "rationale",
                                 "expected_answer",
                                 "expected_tool",
                                 "expected_tool_params",
@@ -557,6 +577,7 @@ class LLMSupervisorV2:
             "last_specs": [
                 {
                     "subtask": s.subtask,
+                    "rationale": s.rationale,
                     "expected_answer": s.expected_answer,
                     "expected_tool": s.expected_tool,
                     "expected_tool_params": s.expected_tool_params,
@@ -578,12 +599,12 @@ class LLMSupervisorV2:
                 "role": "system",
                 "content": (
                     "You are restructuring a redundant multi-step plan.\n"
-                    "Given last_specs = list of {subtask, expected_answer}, compress it into a minimal set.\n"
+                    "Given last_specs = list of {subtask, rationale, expected_answer}, compress it into a minimal set.\n"
                     "Rules:\n"
                     "- Do NOT add any new facts or answers.\n"
                     "- Do NOT change expected_answer values.\n"
                     "- Remove duplicates and 'report/parse/extract' rephrasings when they repeat the same expected_answer.\n"
-                    "- Output JSON only: {subtasks:[{subtask, expected_answer}, ...]}.\n"
+                    "- Output JSON only: {subtasks:[{subtask, rationale, expected_answer}, ...]}.\n"
                 ),
             },
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
@@ -602,6 +623,7 @@ class LLMSupervisorV2:
         out = []
         for it in data.get("subtasks", []):
             sub = (it.get("subtask") or "").strip()
+            rationale = (it.get("rationale") or "").strip()
             ans = (it.get("expected_answer") or "").strip()
             et = it.get("expected_tool", None)
             etp = it.get("expected_tool_params", None)
@@ -609,6 +631,7 @@ class LLMSupervisorV2:
                 out.append(
                     SubtaskSpec(
                         subtask=sub,
+                        rationale=rationale,
                         expected_answer=ans,
                         expected_tool=et,
                         expected_tool_params=etp,

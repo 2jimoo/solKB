@@ -27,6 +27,7 @@ class TaskNode:
 @dataclass
 class SubtaskSpec:
     subtask: str
+    rationale: str
     expected_answer: Optional[str] = None
     expected_tool: Optional[str] = None
     expected_tool_params: Optional[str] = None
