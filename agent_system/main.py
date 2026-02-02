@@ -23,10 +23,11 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 
+
 def save_result(
     *,
     base_path: str | Path,
-    task_type: str,
+    task_type: int,
     question: str,
     agent_planning,
     true_answer: str,
@@ -35,8 +36,7 @@ def save_result(
     base_path = Path(base_path)
     base_path.mkdir(parents=True, exist_ok=True)
 
-    safe_task_type = (task_type or "UNKNOWN_TASK_TYPE").strip().replace("/", "_")
-    out_path = base_path / f"{safe_task_type}.json"
+    out_path = base_path / f"task_{task_type}.json"
 
     payload = {
         "task_type": task_type,
@@ -44,7 +44,6 @@ def save_result(
         "agent_planning": agent_planning,
         "true_answer": true_answer,
         "solved_records": solved_records,
-        "saved_at": datetime.now(timezone.utc).isoformat(),
     }
 
     out_path.write_text(
@@ -52,6 +51,7 @@ def save_result(
         encoding="utf-8",
     )
     return out_path
+
 
 def parse_args():
     p = argparse.ArgumentParser()
@@ -2281,6 +2281,7 @@ def main():
     # nohup python -m agent_system.main --task_type 15 > task15.log 2>&1 &
     # Sam Bankman-Fried가 271개..? Sportsbooks가 75개...? 문제는 안 겹침?_? 어케 구성했길래??
     # for i in {1..20}; do         nohup python -m agent_system.main --task_type $i > task$i.log 2>&1;         done
+
 
 if __name__ == "__main__":
     main()

@@ -69,7 +69,12 @@ class LLMSupervisorV2:
                 sibling_solved=sibling_solved,
                 max_items=max_items,
             )
-            subtasks_str = "\n".join([f"SubTask:{s['subtask']}\n- Rationale:{s['rationale']}" for s in subtasks])
+            subtasks_str = "\n".join(
+                [
+                    f"SubTask:{s['subtask']}\n- Rationale:{s['rationale']}"
+                    for s in subtasks
+                ]
+            )
             logger.info(f"[{r}]Superviser Plan:\n{subtasks_str}")
 
             # 2) solve each subtask to fill expected_answer
@@ -95,7 +100,7 @@ class LLMSupervisorV2:
                         wrong_attempts=wrong_attempts,
                     )
                     logger.info(
-                        f"[{r}-{aidx}]Superviser Solve\nSubtask:{st}\nAnswer:{ans}\nTool:{exp_tool}, {exp_tool_params}"
+                        f"[{r}-{aidx}]Superviser Solve\nSubtask:{st_text}\nAnswer:{ans}\nTool:{exp_tool}, {exp_tool_params}"
                     )
                     # UNKNOWN/empty면 재시도, 아니면 확정
                     if ans and ans.strip().upper() != "UNKNOWN":
@@ -114,7 +119,9 @@ class LLMSupervisorV2:
                     f"[{r}]Superviser Solve\nSubtask:{st}\nAnswer:{ans}\nTool:{exp_tool}, {exp_tool_params}"
                 )
                 if ans and ans.strip().upper() != "UNKNOWN":
-                    local_siblings.append({"subtask": st_text, "rationale":st_rat, "answer": ans.strip()})
+                    local_siblings.append(
+                        {"subtask": st_text, "rationale": st_rat, "answer": ans.strip()}
+                    )
                     local_siblings = local_siblings[-keep_sibling_ctx:]
                 else:
                     break

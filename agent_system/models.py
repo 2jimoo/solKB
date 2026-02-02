@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, TypedDict
 
 
 @dataclass
@@ -54,3 +54,24 @@ class SolveReference:
 class ToolContribution:
     tool_name: Optional[str]
     tool_args: Optional[str]
+
+
+class Subtask(TypedDict):
+    subgoal: str
+    rationale: str
+    actions: List[str]
+
+
+class TaskResult(TypedDict, total=False):
+    task_id: str
+    task: str
+    subtasks: List[Subtask]
+    total_score: float
+
+
+class ExecutionResult(TypedDict, total=False):
+    ok: bool
+    output: Any
+    error: str
+    attempts: int
+    depth: int
