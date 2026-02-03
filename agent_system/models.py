@@ -75,3 +75,20 @@ class ExecutionResult(TypedDict, total=False):
     error: str
     attempts: int
     depth: int
+
+
+class SLMFailureRecord(TypedDict, total=False):
+    attempt: int
+    turn: int
+    tool_name: Optional[str]
+    arguments: Optional[Dict[str, Any]]
+    output: Any
+    error: Optional[str]
+    raw: Optional[str]
+    timestamp: Optional[float]
+
+
+class RewriteResult(TypedDict):
+    status: Literal["OK", "ABORT"]
+    rewritten_subtask: Optional[str]  # OK면 string, ABORT면 None
+    reason: str

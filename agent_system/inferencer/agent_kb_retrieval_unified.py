@@ -88,7 +88,9 @@ class AgenticKnowledgeBase:
             batch: List[TaskInstance] = []
             for item in data:
                 try:
-                    task_id = item.get("task_id") or str(datetime.now().timestamp())
+                    task_id = str(item.get("task_id")) or str(
+                        datetime.now().timestamp()
+                    )
                     task_text = item.get("task", "")
 
                     raw_subtasks = item.get("subtasks", [])
@@ -187,7 +189,7 @@ class AgenticKnowledgeBase:
             task_id = component["task_ids"][idx]
             results.append(
                 {
-                    "task_id": task_id,
+                    "task_id": str(task_id),
                     "score": float(similarities[idx]),
                     "field": field,
                     "content": getattr(self.tasks[task_id], field),
@@ -220,7 +222,7 @@ class AgenticKnowledgeBase:
         for idx in top_indices:
             results.append(
                 {
-                    "task_id": tasks[idx].task_id,
+                    "task_id": str(tasks[idx].task_id),
                     "score": float(similarities[idx]),
                     "field": field,
                     "content": tasks[idx].task,
@@ -278,7 +280,7 @@ class AKB_Manager:
             task_obj = self.knowledge_base.tasks[task_id]
             detailed_results.append(
                 {
-                    "task_id": task_id,
+                    "task_id": str(task_id),
                     "total_score": float(total_score),
                     "task": task_obj.task,
                     "subtasks": [
@@ -302,10 +304,10 @@ class AKB_Manager:
             task_obj = self.get_task_details(result["task_id"])
             results.append(
                 {
-                    "task_id": result["task_id"],
+                    "task_id": str(result["task_id"]),
                     "score": result["score"],
                     "content": {
-                        "task_id": task_obj.task_id,
+                        "task_id": str(task_obj.task_id),
                         "task": task_obj.task,
                         "subtasks": [
                             {
@@ -328,10 +330,10 @@ class AKB_Manager:
             task_obj = self.get_task_details(result["task_id"])
             results.append(
                 {
-                    "task_id": result["task_id"],
+                    "task_id": str(result["task_id"]),
                     "score": result["score"],
                     "content": {
-                        "task_id": task_obj.task_id,
+                        "task_id": str(task_obj.task_id),
                         "task": task_obj.task,
                         "subtasks": [
                             {

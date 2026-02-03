@@ -149,7 +149,6 @@ class LLMRunnerWithTools:
                 return resp
             time.sleep(0.5)
 
-        # --- max steps reached: force a final synthesis from the model ---
         tool_trace_text = json.dumps(executed_tool_calls, ensure_ascii=False, indent=2)
         final_prompt = (
             "Using the conversation history and all tool results provided so far, produce a concise final answer now.\n"

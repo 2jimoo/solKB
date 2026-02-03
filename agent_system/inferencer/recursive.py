@@ -3,15 +3,17 @@ from __future__ import annotations
 import json
 import time
 from typing import TypedDict, List, Optional, Dict, Any, Callable, Literal, Tuple
+from agent_system.models import Subtask, TaskResult
+from agent_system.reconstructor import SubtaskRewriter
+
+import logging
 
 SearchMode = Literal["hybrid", "text", "semantic"]
 
+logger = logging.getLogger(__name__)
+
 
 class RecursiveInferencer:
-    """
-    root_task(str) -> AKB 검색 -> SLM으로 subtasks 생성 -> 순차 실행
-      - subtask 실패 시: 실패 컨텍스트로 AKB 재검색 -> SLM replanning -> 재귀적으로 해결
-    """
 
     def __init__(
         self,
@@ -25,6 +27,10 @@ class RecursiveInferencer:
         max_depth: int = 3,
         max_retries_per_depth: int = 2,
         backoff_sec: float = 0.5,
+        subtask_rewriter: Optional[SubtaskRewriter] = None,
+        rewrite_before_recursive: bool = True,
+        rewrite_retry_budget: int = 1,  # 재기술 후 추가로 몇 번 재시도할지
+        rewrite_guidance: Optional[str] = None,
     ):
         self.akbclient = akb_client
         self.slm = slm_runner
@@ -37,6 +43,11 @@ class RecursiveInferencer:
         self.max_depth = max_depth
         self.max_retries_per_depth = max_retries_per_depth
         self.backoff_sec = backoff_sec
+
+        self.subtask_rewriter = subtask_rewriter
+        self.rewrite_before_recursive = rewrite_before_recursive
+        self.rewrite_retry_budget = rewrite_retry_budget
+        self.rewrite_guidance = rewrite_guidance
 
     # ---------- AKB ----------
     def fetch_refs(
@@ -69,10 +80,6 @@ class RecursiveInferencer:
         max_docs: int = 5,
         max_subtasks_per_doc: int = 8,
     ) -> List[Dict[str, Any]]:
-        """
-        SLM이 이해하기 쉬운 형태로 레퍼런스 subtasks/rationale만 카드화.
-        (actions는 참고로 넣어도 되지만, rationale 기반 생성이 목적이라 기본은 제외/축약)
-        """
         cards: List[Dict[str, Any]] = []
         for i, r in enumerate(refs[:max_docs]):
             st_list = r.get("subtasks") or []
@@ -81,13 +88,11 @@ class RecursiveInferencer:
 
             cards.append(
                 {
-                    "doc_id": r.get("task_id", f"doc_{i}"),
                     "task": r.get("task", ""),
                     "subtasks": [
                         {
                             "subgoal": st.get("subgoal", ""),
                             "rationale": st.get("rationale", ""),
-                            # "actions": st.get("actions", [])  # 필요하면 주석 해제
                         }
                         for st in st_list[:max_subtasks_per_doc]
                         if isinstance(st, dict) and st.get("subgoal")
@@ -121,7 +126,7 @@ class RecursiveInferencer:
             "Return JSON ONLY with shape:\n"
             "{\n"
             '  "subtasks": [\n'
-            '    {"subgoal":"...", "rationale":"...", "actions":["...", "..."]}\n'
+            '    {"subgoal":"...", "rationale":"..."}\n'
             "  ]\n"
             "}\n"
         )
@@ -161,135 +166,205 @@ class RecursiveInferencer:
         for st in st_list[:max_subtasks]:
             if not isinstance(st, dict):
                 continue
-            if not all(k in st for k in ("subgoal", "rationale", "actions")):
-                continue
-            actions = st.get("actions")
-            if not isinstance(actions, list):
+            if not all(k in st for k in ("subgoal", "rationale")):
                 continue
 
             out.append(
                 {
                     "subgoal": str(st["subgoal"]),
                     "rationale": str(st["rationale"]),
-                    "actions": [str(a) for a in actions],
                 }
             )
         return out
 
-    def run_subtask_once(
+    # ---------- Difficulty ----------
+    def _doc_difficulty(self, ref: "TaskResult") -> int:
+        """
+        문서 난이도 = 해당 문서(TaskResult)의 subtasks 개수
+        """
+        st_list = ref.get("subtasks") or []
+        return len(st_list) if isinstance(st_list, list) else 0
+
+    def estimate_difficulty(
         self,
-        subtask: Subtask,
-        action_executor: Callable[[str], Any],
-    ) -> ExecutionResult:
-        outputs: List[Any] = []
+        query: str,
+        *,
+        mode: Optional["SearchMode"] = None,
+        top_k: Optional[int] = None,
+        weights: Optional[Dict[str, float]] = None,
+        min_docs: int = 1,
+    ) -> Tuple[float, List["TaskResult"]]:
+        """
+        task와 유사한 문서 조회 후,
+        task 난이도 = (유사 문서 난이도 평균)
+        """
+        refs = self.fetch_refs(query, mode=mode, top_k=top_k, weights=weights)
+
+        diffs: List[int] = []
+        for r in refs:
+            d = self._doc_difficulty(r)
+            diffs.append(d)
+
+        # 문서가 너무 없거나 전부 0이면 fallback: 0.0
+        if len(diffs) < min_docs:
+            return 0.0, refs
+
+        avg = sum(diffs) / max(len(diffs), 1)
+        return float(avg), refs
+
+    # ---------- Execution (single) ----------
+    def run_query_once(
+        self,
+        query: str,
+        tools: ToolRegistry,
+        slm_attempt_histories=None,
+    ) -> "ExecutionResult":
+        """
+        서브태스크로 쪼개지 않고 query 자체를 바로 푸는 실행 경로
+        """
         try:
-            for act in subtask["actions"]:
-                outputs.append(action_executor(act))
+            outputs = self.slm.solve_with_tools(
+                question=query,
+                tools=tools,
+                slm_attempt_histories=slm_attempt_histories,
+            )
             return {"ok": True, "output": outputs}
         except Exception as e:
-            return {"ok": False, "error": str(e), "output": outputs}
+            return {"ok": False, "error": str(e), "output": []}
 
-    def solve_subtask_recursive(
+    # ---------- Adaptive recursive solver ----------
+    def run(
         self,
         *,
         root_task: str,
-        subtask: Subtask,
-        action_executor: Callable[[str], Any],
+        task: str,
+        tools: ToolRegistry,
+        difficulty_threshold: float,
         depth: int = 0,
         max_depth: Optional[int] = None,
-        max_retries_per_depth: Optional[int] = None,
-    ) -> ExecutionResult:
-        max_depth = self.max_depth if max_depth is None else max_depth
-        max_retries_per_depth = (
-            self.max_retries_per_depth
-            if max_retries_per_depth is None
-            else max_retries_per_depth
+        stop_on_first_failure: bool = True,
+        slm_attempt_histories=[],
+    ) -> Dict[str, Any]:
+        logger.info(
+            f"====================================== DEPTH {depth} ======================================\n"
+            f"Root Task: {root_task}\n"
+            f"Current Task: {task}\n"
         )
-
-        # 1) 동일 계획으로 재시도
-        last_err = ""
-        for attempt in range(1, max_retries_per_depth + 1):
-            r = self.run_subtask_once(subtask, action_executor)
-            r["attempts"] = attempt
-            r["depth"] = depth
-            if r.get("ok"):
-                return r
-            last_err = r.get("error", "unknown error")
-            time.sleep(self.backoff_sec * attempt)
-
-        # 2) 깊이 제한
-        if depth >= max_depth:
+        max_depth = self.max_depth if max_depth is None else max_depth
+        if depth > max_depth:
             return {
                 "ok": False,
-                "error": f"Max depth reached. Last error: {last_err}",
-                "attempts": max_retries_per_depth,
+                "task": task,
                 "depth": depth,
+                "error": f"Max depth exceeded (>{max_depth})",
             }
 
-        # 3) 실패 컨텍스트로 AKB 재조회 -> replanning -> 재귀 해결
-        failure_query = (
-            f"ROOT_TASK: {root_task}\n"
-            f"FAILED_SUBTASK: {subtask['subgoal']}\n"
-            f"RATIONALE: {subtask.get('rationale','')}\n"
-            f"ACTIONS: {json.dumps(subtask.get('actions',[]), ensure_ascii=False)}\n"
-            f"ERROR: {last_err}\n"
-            "REQUEST: Create an improved, more concrete and smaller-grained subtask plan to resolve this failure."
-        )
-
-        refs = self.fetch_refs(failure_query)
-        new_subtasks = self.plan_subtasks(failure_query, refs, max_subtasks=3)
-
-        aggregated: List[Any] = []
-        for st in new_subtasks:
-            child = self.solve_subtask_recursive(
-                root_task=root_task,
-                subtask=st,
-                action_executor=action_executor,
-                depth=depth + 1,
-                max_depth=max_depth,
-                max_retries_per_depth=max_retries_per_depth,
-            )
-            if not child.get("ok"):
-                return child
-            aggregated.append(child.get("output"))
-
-        return {
-            "ok": True,
-            "output": aggregated,
-            "attempts": max_retries_per_depth,
-            "depth": depth,
-        }
-
-    def run(
-        self,
-        task: str,
-        action_executor: Callable[[str], Any],
-        *,
-        stop_on_first_failure: bool = True,
-    ) -> Dict[str, Any]:
-        refs = self.fetch_refs(task)
-        subtasks = self.plan_subtasks(task, refs, max_subtasks=self.max_subtasks)
-
-        results: List[Dict[str, Any]] = []
-        for st in subtasks:
-            r = self.solve_subtask_recursive(
-                root_task=task,
-                subtask=st,
-                action_executor=action_executor,
-                depth=0,
-            )
-            results.append({"subtask": st, "result": r})
-            if stop_on_first_failure and not r.get("ok"):
+        # 1) depth != 0이면 현재 태스크 재기술 시도 (옵션)
+        task_to_solve = task
+        rewriter_meta = None
+        if depth != 0 and self.subtask_rewriter and self.rewrite_before_recursive:
+            try:
+                rewrite_res = self.subtask_rewriter.rewrite(
+                    original_task=root_task,
+                    current_subtask={"subgoal": task, "rationale": ""},
+                    failure_logs=slm_attempt_histories,
+                    guidance=self.rewrite_guidance,
+                )
+                logger.info(
+                    f"Rewrite\n[BEFORE] {task}\n[AFTER] {rewrite_res['rewritten_subtask']}"
+                )
+            except Exception as e:
                 return {
                     "ok": False,
                     "task": task,
-                    "planned_subtasks": subtasks,
+                    "depth": depth,
+                    "error": f"rewrite error: {e}",
+                }
+
+            if rewrite_res.get("status") == "ABORT":
+                return {
+                    "ok": False,
+                    "task": task,
+                    "depth": depth,
+                    "error": f"rewrite aborted: {rewrite_res.get('reason')}",
+                }
+            # OK이면 교체
+            task_to_solve = rewrite_res.get("rewritten_subtask") or task
+            rewriter_meta = rewrite_res
+
+        # 2) 난이도 측정
+        difficulty, refs = self.estimate_difficulty(task_to_solve)
+        logger.info(f"Estimated Difficulty: {difficulty}")
+        # logger.info(f"Refs: {json.dumps(refs, ensure_ascii=False, indent=2)}")
+
+        # 3) threshold 이하이면 direct 시도
+        if difficulty <= difficulty_threshold:
+            hist: List[Dict[str, Any]] = []
+            direct = self.run_query_once(
+                task_to_solve, tools, slm_attempt_histories=hist
+            )
+            direct.update(
+                {
+                    "task": task_to_solve,
+                    "root_task": root_task,
+                    "depth": depth,
+                    "estimated_difficulty": difficulty,
+                    "strategy": "direct",
+                    "rewriter": rewriter_meta,
+                }
+            )
+            logger.info(f"Try to solve directly. result:\n{direct}")
+            if direct.get("ok"):
+                return direct
+            # direct 실패면 분해로 fallback (아래 분해 로직으로 내려감)
+
+        # 4) 분해 시도 (난이도 초과거나 direct 실패)
+        planned = self.plan_subtasks(
+            task_to_solve, refs, max_subtasks=self.max_subtasks
+        )
+        planned_str = "\n".join([p["subgoal"] for p in planned])
+        logger.info(f"Decomposed to...\n{planned_str}")
+
+        results: List[Dict[str, Any]] = []
+        for st in planned:
+            subgoal = st["subgoal"]
+
+            # 재귀 호출: 서브태스크에 대해서 동일 규칙 적용
+            logger.info(f"Start to recurse: {subgoal}")
+            child = self.run(
+                root_task=root_task,
+                task=subgoal,
+                tools=tools,
+                difficulty_threshold=difficulty_threshold,
+                depth=depth + 1,
+                max_depth=max_depth,
+                stop_on_first_failure=stop_on_first_failure,
+            )
+            logger.info(f"Recursioin ended {child}")
+
+            results.append({"subtask": st, "result": child})
+            if stop_on_first_failure and not child.get("ok"):
+                logger.info(f"Recursioin Failed.")
+                return {
+                    "ok": False,
+                    "task": task_to_solve,
+                    "root_task": root_task,
+                    "depth": depth,
+                    "estimated_difficulty": difficulty,
+                    "strategy": "decompose",
+                    "planned_subtasks": planned,
                     "results": results,
                 }
 
+        logger.info(f"Recursioin Succeeded.")
         return {
             "ok": True,
-            "task": task,
-            "planned_subtasks": subtasks,
+            "task": task_to_solve,
+            "root_task": root_task,
+            "depth": depth,
+            "estimated_difficulty": difficulty,
+            "strategy": "decompose",
+            "planned_subtasks": planned,
             "results": results,
+            "rewriter": rewriter_meta,
         }

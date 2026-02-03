@@ -11,12 +11,13 @@ from agent_system.orchestrator import (
 )
 from dotenv import load_dotenv
 import os
-import logging
 import argparse
 from pathlib import Path
 from datetime import datetime, timezone
 
 load_dotenv()
+
+import logging
 
 logging.basicConfig(
     level=logging.INFO,
