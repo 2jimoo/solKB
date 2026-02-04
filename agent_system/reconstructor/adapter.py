@@ -65,7 +65,13 @@ class OpenAIToolLLMAdapter:
             schema=schema,
             max_steps=max_steps,
         )
-        return _extract_text_from_openai_responses(resp)
+        return self._extract_text_from_openai_responses(resp)
+
+    def _extract_text_from_openai_responses(self, resp: Any) -> str:
+        out_items = resp.output  # 또는 out_items 변수
+        msg0 = out_items[0]  # ResponseOutputMessage
+        text0 = msg0.content[0].text  # ResponseOutputText.text
+        return text0
 
 
 class SLMRunnerHFAdapter:
@@ -111,25 +117,3 @@ class SLMRunnerHFAdapter:
         )
         # answer가 JSON 텍스트여야 함
         return (out.get("answer") or "").strip()
-
-
-def _extract_text_from_openai_responses(resp: Any) -> str:
-    out_items = getattr(resp, "output", None) or []
-    chunks: List[str] = []
-    for it in out_items:
-        if isinstance(it, dict):
-            t = it.get("type")
-            if t == "output_text":
-                chunks.append(it.get("text", "") or "")
-            elif t == "message":
-                content = it.get("content") or []
-                for c in content:
-                    if isinstance(c, dict) and c.get("type") == "output_text":
-                        chunks.append(c.get("text", "") or "")
-            elif isinstance(it.get("text"), str):
-                chunks.append(it["text"])
-        else:
-            t = getattr(it, "type", None)
-            if t == "output_text":
-                chunks.append(getattr(it, "text", "") or "")
-    return "\n".join([c for c in chunks if c]).strip()

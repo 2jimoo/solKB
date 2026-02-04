@@ -1,7 +1,16 @@
-from agent_system.inferencer import AKBClient, RecursiveInferencer
+from agent_system.inferencer import (
+    AKBClient,
+    RecursiveInferencer,
+    RecursiveLLMInferencer,
+)
 from agent_system.slm import SLMRunnerHF
+from agent_system.llm import LLMRunnerWithTools
 from agent_system.tools import build_tool_registry
-from agent_system.reconstructor import SubtaskRewriter, SLMRunnerHFAdapter
+from agent_system.reconstructor import (
+    SubtaskRewriter,
+    SLMRunnerHFAdapter,
+    OpenAIToolLLMAdapter,
+)
 
 from dotenv import load_dotenv
 import os
@@ -21,10 +30,12 @@ if __name__ == "__main__":
     # Instantiate dependencies
     akb = AKBClient()
     slm = SLMRunnerHF(model_id="Qwen/Qwen3-4B-Instruct-2507")
+    # llm = LLMRunnerWithTools()
 
     rewriter_model = SLMRunnerHFAdapter(slm_runner_hf=slm)
-    rewriter = SubtaskRewriter(model=rewriter_model)
     tools = build_tool_registry()
+    # rewriter_model = OpenAIToolLLMAdapter(llm, tools)
+    rewriter = SubtaskRewriter(model=rewriter_model)
 
     # Create the inferencer with rewrite enabled
     inferencer = RecursiveInferencer(
@@ -36,8 +47,17 @@ if __name__ == "__main__":
         subtask_rewriter=rewriter,
         rewrite_before_recursive=True,
         rewrite_retry_budget=1,
-        rewrite_guidance="Make it more precise for automated tools.",
     )
+    # inferencer = RecursiveLLMInferencer(
+    #     akb_client=akb,
+    #     llm_runner=llm,
+    #     max_subtasks=4,
+    #     max_depth=5,
+    #     max_retries_per_depth=1,
+    #     subtask_rewriter=rewriter,
+    #     rewrite_before_recursive=True,
+    #     rewrite_retry_budget=1,
+    # )
 
     # Run a task
     original_task = """
@@ -60,7 +80,7 @@ if __name__ == "__main__":
         root_task=original_task,
         task=original_task,
         tools=tools,  # pass your tool registry
-        difficulty_threshold=2.0,
+        difficulty_threshold=2.6,
         stop_on_first_failure=True,
     )
     #  nohup python -m agent_system.inference > inference.log 2>&1

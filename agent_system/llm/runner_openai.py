@@ -33,7 +33,7 @@ class LLMRunnerWithTools:
         kwargs = dict(
             model=self.model,
             input=messages,
-            tools=tools.openai_tools,
+            tools=tools.openai_tools if tools else None,
             text={"format": schema} if schema else None,
         )
         resp = self.client.responses.create(**kwargs)

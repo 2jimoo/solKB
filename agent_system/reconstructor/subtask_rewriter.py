@@ -75,14 +75,21 @@ class SubtaskRewriter:
     @staticmethod
     def default_schema() -> Dict[str, Any]:
         return {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "status": {"type": "string", "enum": ["OK", "ABORT"]},
-                "rewritten_subtask": {"anyOf": [{"type": "null"}, {"type": "string"}]},
-                "reason": {"type": "string"},
+            "type": "json_schema",
+            "name": "subtask_rewrite",
+            "schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "status": {"type": "string", "enum": ["OK", "ABORT"]},
+                    "rewritten_subtask": {
+                        "anyOf": [{"type": "null"}, {"type": "string"}]
+                    },
+                    "reason": {"type": "string"},
+                },
+                "required": ["status", "rewritten_subtask", "reason"],
             },
-            "required": ["status", "rewritten_subtask", "reason"],
+            "strict": True,
         }
 
     def _build_messages(
@@ -109,7 +116,7 @@ class SubtaskRewriter:
             system += f"\nAdditional guidance:\n{guidance}\n"
 
         payload = {
-            "ORIGINAL_TASK": original_task,
+            # "ORIGINAL_TASK": original_task,
             "CURRENT_SUBTASK": {
                 "subgoal": current_subtask.get("subgoal", ""),
                 "rationale": current_subtask.get("rationale", ""),
