@@ -124,37 +124,37 @@ def build_tool_registry() -> ToolRegistry:
         },
     )
 
-    tr.register(
-        name="tool_searchapi_search",
-        func=tool_searchapi_search,
-        description="Search the web via SearchAPI.io (Google).",
-        parameters={
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"},
-                "num_results": {"type": "integer", "minimum": 1, "maximum": 10},
-                "gl": {"type": "string"},
-                "hl": {"type": "string"},
-            },
-            "required": ["query"],
-            "additionalProperties": False,
-        },
-    )
+    # tr.register(
+    #     name="tool_searchapi_search",
+    #     func=tool_searchapi_search,
+    #     description="Search the web via SearchAPI.io (Google).",
+    #     parameters={
+    #         "type": "object",
+    #         "properties": {
+    #             "query": {"type": "string"},
+    #             "num_results": {"type": "integer", "minimum": 1, "maximum": 10},
+    #             "gl": {"type": "string"},
+    #             "hl": {"type": "string"},
+    #         },
+    #         "required": ["query"],
+    #         "additionalProperties": False,
+    #     },
+    # )
 
-    tr.register(
-        name="jina_read_url",
-        func=tool_jina_read_url,
-        description="Fetch a URL and convert it to clean text using Jina Reader (r.jina.ai).",
-        parameters={
-            "type": "object",
-            "properties": {
-                "url": {"type": "string"},
-                "timeout_s": {"type": "integer", "minimum": 5, "maximum": 120},
-                "clip_chars": {"type": "integer", "minimum": 1000, "maximum": 50000},
-            },
-            "required": ["url"],
-            "additionalProperties": False,
-        },
-    )
+    # tr.register(
+    #     name="jina_read_url",
+    #     func=tool_jina_read_url,
+    #     description="Fetch a URL and convert it to clean text using Jina Reader (r.jina.ai).",
+    #     parameters={
+    #         "type": "object",
+    #         "properties": {
+    #             "url": {"type": "string"},
+    #             "timeout_s": {"type": "integer", "minimum": 5, "maximum": 120},
+    #             "clip_chars": {"type": "integer", "minimum": 1000, "maximum": 50000},
+    #         },
+    #         "required": ["url"],
+    #         "additionalProperties": False,
+    #     },
+    # )
 
     return tr

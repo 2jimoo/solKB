@@ -101,8 +101,8 @@ def build_kb_from_solved_records(
 
         kb.append(
             {
-                "task_type": task_type,
-                "question": question,
+                "task_id": task_type,
+                "task": question,
                 "agent_planning": agent_planning,
                 "true_answer": true_answer,
                 "subtasks": subtasks,
@@ -240,8 +240,8 @@ def build_kb_from_agent_planning_openai(
 
         kb.append(
             {
-                "task_type": task_type,
-                "question": question,
+                "task_id": task_type,
+                "task": question,
                 "agent_planning": agent_planning,
                 "true_answer": true_answer,
                 "subtasks": parsed.get("subtasks", []),
