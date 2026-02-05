@@ -28,6 +28,7 @@ logging.basicConfig(
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--task_type", required=True, type=int)  
+    p.add_argument("--model", default="gpt-5-mini", type=str)  #"gpt-4.1"
     return p.parse_args()
 
 
@@ -97,7 +98,7 @@ def main():
     kb = JsonlKB("kb.jsonl")
     tools = build_tool_registry()
 
-    llm_runner = LLMRunnerWithTools(model="gpt-5-mini")
+    llm_runner = LLMRunnerWithTools(model=)
     supervisor = LLMSupervisorV2(llm_runner)
 
     slm = SLMRunnerHF(model_id="Qwen/Qwen3-4B-Instruct-2507")
@@ -117,7 +118,14 @@ def main():
 
     # 4) result가 None이 아니면 answer.json에 append
     if result is not None:
-        append_result_to_answer_json("./answer.json", result)
+        answer= {
+            "task_id": str(args.task_type),
+            "task":question,
+            "true_answer":true_answer,
+            "agent_planning": agent_planning,
+            "subtasks": result
+        }
+        append_result_to_answer_json("./answer.json", answer)
 
 
 if __name__ == "__main__":
