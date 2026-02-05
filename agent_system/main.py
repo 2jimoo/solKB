@@ -98,7 +98,7 @@ def main():
     kb = JsonlKB("kb.jsonl")
     tools = build_tool_registry()
 
-    llm_runner = LLMRunnerWithTools(model=)
+    llm_runner = LLMRunnerWithTools(model=args.model)
     supervisor = LLMSupervisorV2(llm_runner)
 
     slm = SLMRunnerHF(model_id="Qwen/Qwen3-4B-Instruct-2507")
@@ -125,7 +125,7 @@ def main():
             "agent_planning": agent_planning,
             "subtasks": result
         }
-        append_result_to_answer_json("./answer.json", answer)
+        append_result_to_answer_json(f"./answer_{args.model}.json", answer)
 
 
 if __name__ == "__main__":
