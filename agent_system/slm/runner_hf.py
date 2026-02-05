@@ -124,7 +124,7 @@ class SLMRunnerHF:
                     continue
 
                 if action.get("action") == "FINAL":
-                    final_answer = action.get("answer", "")
+                    final_answer = action.get("answer", "") or  action.get("answer_so_far", "")
                     return {
                         "status": "final",
                         "answer": final_answer,

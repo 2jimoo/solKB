@@ -112,17 +112,17 @@ def tool_jina_read_url(
 def build_tool_registry() -> ToolRegistry:
     tr = ToolRegistry()
 
-    tr.register(
-        name="calc",
-        func=tool_calc,
-        description="Safely evaluate a basic math expression (no variables, no function calls).",
-        parameters={
-            "type": "object",
-            "properties": {"expression": {"type": "string"}},
-            "required": ["expression"],
-            "additionalProperties": False,
-        },
-    )
+    # tr.register(
+    #     name="calc",
+    #     func=tool_calc,
+    #     description="Safely evaluate a basic math expression (no variables, no function calls).",
+    #     parameters={
+    #         "type": "object",
+    #         "properties": {"expression": {"type": "string"}},
+    #         "required": ["expression"],
+    #         "additionalProperties": False,
+    #     },
+    # )
 
     # tr.register(
     #     name="tool_searchapi_search",

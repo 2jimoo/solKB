@@ -47,10 +47,10 @@ class LLMSupervisorV2:
         is_root: bool = True,
         sibling_solved: Optional[List[Dict[str, str]]] = None,
         actual_answer: Optional[str] = None,
-        max_items: int = 5,
+        max_items: int = 10,
         keep_sibling_ctx: int = 8,
-        max_rounds: int = 5,
-        max_solve_attempts_per_subtask: int = 2,
+        max_rounds: int = 10,
+        max_solve_attempts_per_subtask: int = 3,
     ) -> List[SubtaskSpec]:
         rounds = max_rounds if actual_answer is not None else 1
         last_specs: List[SubtaskSpec] = []
@@ -295,7 +295,7 @@ class LLMSupervisorV2:
 
         if is_root and reference.reference_planning:
             sys_prompt = (
-                "Convert reference planning into 1-5 subtasks for a WEAK agent.\n"
+                "Convert reference planning into 1-10 subtasks for a WEAK agent.\n"
                 "Return JSON only: {subtasks:[...]}\n\n"
                 + common_constraints
                 + "Use failed_history to avoid repeating mistakes.\n"
@@ -311,7 +311,7 @@ class LLMSupervisorV2:
             }
         else:
             sys_prompt = (
-                "Decompose question into 1-5 SMALL, SEQUENTIAL subtasks for a WEAK agent.\n"
+                "Decompose question into 1-10 SMALL, SEQUENTIAL subtasks for a WEAK agent. If there’s no need to split it, you don’t have to.\n"
                 "Return JSON only: {subtasks:[...]}\n\n"
                 + common_constraints
                 + "Guidelines:\n"

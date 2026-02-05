@@ -97,7 +97,7 @@ def main():
     kb = JsonlKB("kb.jsonl")
     tools = build_tool_registry()
 
-    llm_runner = LLMRunnerWithTools(model="gpt-4.1")
+    llm_runner = LLMRunnerWithTools(model="gpt-5-mini")
     supervisor = LLMSupervisorV2(llm_runner)
 
     slm = SLMRunnerHF(model_id="Qwen/Qwen3-4B-Instruct-2507")
